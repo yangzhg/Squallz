@@ -13,7 +13,8 @@ Squallz has two desktop layouts and a CLI. Archive operations belong to the shar
 | Output preparation, review, submission and cancellation lifecycle | `archive-output-workflow.svelte.ts` | Create preflight and conversion session |
 | Workspace, system-temp and output disk budgets | `archive-disk-preflight.ts` | Create and conversion preflight |
 | Output conflict validation, confirmation and renewed authorization | `archive-output-authorization.ts` | Create, conversion and recovery export |
-| Archive rows, selection and browse commands | `archiveBrowserSurface()` in `App.svelte`, with contracts in `archive-browser.ts` | Both archive browsers |
+| Archive entry presentation and virtual row window | `archive-browser.ts` | Both archive browsers |
+| Visible rows, selection and browse commands | `archiveBrowserSurface()` in `App.svelte` | Both archive browsers |
 | Prepared-entry state and lifecycle | `preview-session.svelte.ts` | Browser actions and inspector |
 | Preview content and actions | `ArchiveEntryPreview.svelte` | Classic sidebar and Modern inspector |
 | Translation lookup, fallback and interpolation | `i18n.svelte.ts` and `locales/*.json` | All frontend features |
@@ -36,7 +37,7 @@ Menus measure their rendered size and anchor, clamp to the viewport, and provide
 
 Task control state and operation feedback appear inside the task surface. Showing a task's details consumes its queued completion and source-cleanup notifications without suppressing history, output actions or independent errors. Other notifications retain their remaining visible lifetime while a modal blocks them. Background output actions explicitly name the platform file manager.
 
-Completed task surfaces prioritize the outcome and next step over detailed results and omit redundant completion progress bars. Failed or cancelled tasks retain their measured progress. Batch errors precede summary counts; long result and checksum lists scroll locally. Native task windows grow to fit measured content within the design-token height limit and monitor work area, preserving width and stopping automatic fitting after a manual resize. The outer body remains scrollable as a fallback for constrained windows.
+Completed task surfaces prioritize the outcome and next step over detailed results and omit redundant completion progress bars. Failed or cancelled tasks retain their measured progress. Batch errors precede summary counts. Results and checksum tables scroll with the task body, while long multiline output values can scroll independently. Native task windows grow to fit measured content within the design-token height limit and monitor work area, preserving width and stopping automatic fitting after a manual resize.
 
 Classic and Modern retain different layout, table columns and row heights. Their browser models derive rows and commands from the same state. Preview loading, failure, file and nested-archive actions have one implementation; compact and detailed nested-entry presentation remain explicit layout choices.
 

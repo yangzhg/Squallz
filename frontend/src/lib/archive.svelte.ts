@@ -6,6 +6,8 @@ import {
   ipc,
   isErrorDto,
   type ArchiveInfo,
+  type ArchiveSort,
+  type ArchiveSortKey,
   type EntryDto,
   type ErrorDto,
   type Page,
@@ -13,7 +15,7 @@ import {
 } from "./ipc";
 import { t, tError } from "./i18n.svelte";
 import { pushToast, removeToastByKey } from "./toasts.svelte";
-import { cancelPasswordBookPreview, readPasswordBookPreview, savePasswordBookPreview, forgetPasswordBookPreview, preparedNestedPreviewRows } from "./dev-preview-data";
+import { cancelPasswordBookPreview, readPasswordBookPreview, savePasswordBookPreview, forgetPasswordBookPreview, preparedNestedPreviewRows, sortPreviewEntries } from "./dev-preview-data";
 
 export const PAGE_SIZE = 500;
 export type PasswordBookStatusState = "idle" | "checking" | "ready" | "error";
@@ -77,6 +79,8 @@ const store = $state({
   pages: new Map<number, EntryDto[]>(),
   loading: new Set<number>(),
   filter: "",
+  directorySort: null as ArchiveSort | null,
+  searchSort: null as ArchiveSort | null,
   filterPending: false,
   /** Selected full paths (dirs end with `/`) */
   selected: new Set<string>(),
@@ -185,6 +189,26 @@ export function allRowsLoaded(): boolean {
 
 export function filterText(): string {
   return store.filter;
+}
+
+export function archiveSort() {
+  return store.filter.trim()
+    ? store.searchSort ?? { key: null, direction: "asc" as const }
+    : store.directorySort ?? { key: "name" as const, direction: "asc" as const };
+}
+
+export async function sortArchiveRows(key: ArchiveSortKey): Promise<void> {
+  if (!store.info) return;
+  const current = archiveSort();
+  const direction = current.key === key
+    ? (current.direction === "asc" ? "desc" : "asc")
+    : (key === "name" ? "asc" : "desc");
+  if (store.filter.trim()) store.searchSort = { key, direction };
+  else store.directorySort = key === "name" && direction === "asc" ? null : { key, direction };
+  store.selectionAnchor = null;
+  store.selectionGeneration += 1;
+  cancelFilterReload();
+  await reload();
 }
 
 export function filterPending(): boolean {
@@ -332,6 +356,10 @@ async function performArchiveOpen(
     if (store.info) void ipc.closeArchive(store.info.id);
     store.info = info;
     store.dirs = view.dirs;
+    if (!visibleWindow) {
+      store.directorySort = null;
+      store.searchSort = null;
+    }
     cancelFilterReload();
     store.filter = view.filter;
     store.filterPending = false;
@@ -445,7 +473,7 @@ async function loadOpenedArchiveView(
           throw { key: "error.cancelled", params: {}, detail: "" } satisfies ErrorDto;
         }
         markValidationArchiveCall("listEntries");
-        return ipc.listEntries(id, page, prefix, null, PAGE_SIZE);
+        return ipc.listEntries(id, page, prefix, null, PAGE_SIZE, visibleWindow ? store.directorySort : null, generation + 1);
       };
       const first = await readPage(Math.max(0, Math.floor(window.start / PAGE_SIZE)));
       if (requestGeneration !== store.openGeneration) return null;
@@ -525,6 +553,8 @@ export async function adoptOpenedArchive(info: ArchiveInfo, isCurrent: () => boo
   store.filter = "";
   store.filterPending = false;
   store.previewRows = previewRows;
+  store.directorySort = null;
+  store.searchSort = null;
   clearBrowseError();
   clearArchiveRefreshStatus();
   store.generation += 1;
@@ -746,7 +776,7 @@ async function reload(): Promise<void> {
   store.loading = new Set();
   store.total = 0;
   try {
-    const previewRows = previewRowsForCurrentLevel();
+    const previewRows = currentPreviewRows;
     if (previewRows) {
       if (generation !== store.generation) return;
       store.pages = new Map([[0, previewRows.slice(0, PAGE_SIZE)]]);
@@ -763,7 +793,7 @@ async function reload(): Promise<void> {
       if (generation !== store.generation) return;
       if (dirs.join("/") !== previousDirs.join("/")) {
         markValidationArchiveCall("listEntries");
-        page = await ipc.listEntries(id, 0, dirs.length ? `${dirs.join("/")}/` : "", null, PAGE_SIZE);
+        page = await ipc.listEntries(id, 0, dirs.length ? `${dirs.join("/")}/` : "", null, PAGE_SIZE, store.directorySort, generation);
         if (generation !== store.generation) return;
         store.dirs = dirs;
         clearSelection();
@@ -835,7 +865,7 @@ async function fetchPage(pageNo: number): Promise<void> {
 }
 
 async function loadPage(pageNo: number, generation: number): Promise<void> {
-  const previewRows = previewRowsForCurrentLevel();
+  const previewRows = currentPreviewRows;
   if (previewRows) {
     if (generation !== store.generation) return;
     const pages = new Map(store.pages);
@@ -857,18 +887,19 @@ async function loadPage(pageNo: number, generation: number): Promise<void> {
   store.total = page.total;
 }
 
-function previewRowsForCurrentLevel(): EntryDto[] | null {
+const currentPreviewRows = $derived.by((): EntryDto[] | null => {
   if (!import.meta.env.DEV || !store.previewRows) return null;
   const filter = store.filter.trim().toLowerCase();
   if (filter) {
-    return store.previewRows
+    const matches = store.previewRows
       .filter(
         (row) =>
           row.path.toLowerCase().includes(filter) || row.display.toLowerCase().includes(filter),
       );
+    return store.searchSort ? sortPreviewEntries(matches, store.searchSort) : matches;
   }
   const prefix = currentPrefix();
-  return store.previewRows.filter((row) => {
+  const rows = store.previewRows.filter((row) => {
     if (!row.path.startsWith(prefix)) return false;
     const remainder = row.path.slice(prefix.length);
     if (!remainder) return false;
@@ -876,18 +907,18 @@ function previewRowsForCurrentLevel(): EntryDto[] | null {
     if (!visibleName || visibleName.includes("/")) return false;
     return true;
   });
-}
+  return sortPreviewEntries(rows, store.directorySort ?? { key: "name", direction: "asc" });
+});
 
 async function listArchiveLevelPage(id: number, page: number, generation: number) {
   const dirPrefix = currentPrefix();
-  await ipc.cancelArchiveSearch(id, generation);
   markValidationArchiveCall("listEntries");
-  return ipc.listEntries(id, page, dirPrefix, null, PAGE_SIZE);
+  return ipc.listEntries(id, page, dirPrefix, null, PAGE_SIZE, store.directorySort, generation);
 }
 
 async function searchArchivePage(id: number, page: number, query: string, generation: number) {
   markValidationArchiveCall("searchEntries");
-  return ipc.searchEntries(id, page, query, PAGE_SIZE, generation);
+  return ipc.searchEntries(id, page, query, PAGE_SIZE, generation, store.searchSort);
 }
 
 function clearBrowseError(): void {
@@ -979,6 +1010,7 @@ export async function goUp(): Promise<void> {
 export function setFilter(text: string): void {
   cancelFilterReload();
   clearBrowseError();
+  if (!store.filter.trim()) store.searchSort = null;
   store.filter = text;
   store.filterPending = true;
   store.generation += 1;
@@ -1131,33 +1163,26 @@ async function selectRowsInRange(
   onProgress?.(0, rangeCount);
   if (!isCurrent()) return "stale";
   try {
-    const previewRows = previewRowsForCurrentLevel();
+    const previewRows = currentPreviewRows;
     if (previewRows) {
       addRows(previewRows.slice(first, last + 1));
     } else {
       const lastPage = Math.floor(last / PAGE_SIZE);
-      let cancelledSearch = false;
       for (let start = Math.floor(first / PAGE_SIZE); start <= lastPage; start += SELECTION_PAGE_CONCURRENCY) {
         if (!isCurrent()) return "stale";
         const pageNumbers = Array.from(
           { length: Math.min(SELECTION_PAGE_CONCURRENCY, lastPage - start + 1) },
           (_, index) => start + index,
         );
-        if (!query && !cancelledSearch && pageNumbers.some((page) => !store.pages.has(page))) {
-          await ipc.cancelArchiveSearch(info.id, generation);
-          cancelledSearch = true;
-          if (!isCurrent()) return "stale";
-        }
         const pages = await Promise.all(
           pageNumbers.map(async (pageNumber) => {
             const cached = store.pages.get(pageNumber);
             if (cached) return { total, page: pageNumber, items: cached };
             if (query) {
-              markValidationArchiveCall("searchEntries");
-              return ipc.searchEntries(info.id, pageNumber, query, PAGE_SIZE, generation);
+              return searchArchivePage(info.id, pageNumber, query, generation);
             }
             markValidationArchiveCall("listEntries");
-            return ipc.listEntries(info.id, pageNumber, dirPrefix, null, PAGE_SIZE);
+            return ipc.listEntries(info.id, pageNumber, dirPrefix, null, PAGE_SIZE, store.directorySort, generation);
           }),
         );
         if (!isCurrent()) return "stale";
@@ -1224,6 +1249,8 @@ export function installArchivePreview(
   installValidationArchiveCallCounters();
   store.info = info;
   store.dirs = options?.dirs ?? [];
+  store.directorySort = null;
+  store.searchSort = null;
   store.total = options?.total ?? rows.length;
   store.pages = options?.pages ? new Map(options.pages) : new Map([[0, rows]]);
   store.loading = new Set();

@@ -7,6 +7,7 @@
     "chevron-right": ["m9 18 6-6-6-6"],
     "chevron-up": ["m18 15-6-6-6 6"],
     "chevron-down": ["m6 9 6 6 6-6"],
+    "chevrons-up-down": ["m8 9 4-4 4 4", "m8 15 4 4 4-4"],
     "grip-vertical": [
       "M9 6h.01",
       "M9 12h.01",

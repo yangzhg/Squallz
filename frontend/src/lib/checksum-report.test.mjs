@@ -194,6 +194,7 @@ test("checksum report navigation and copying stay bound to the selected task", a
     writes[1].resolve("copied");
     await newer;
     const notices = run.calls.filter(([name]) => name === "notice").length;
+    assert.equal(notices, 0, "the visible task owns its copy feedback");
     writes[0].resolve("failed");
     await old;
     assert.equal(writes[0].isCurrent(), false);

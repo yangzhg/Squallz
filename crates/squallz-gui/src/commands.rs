@@ -54,7 +54,7 @@ use crate::preview_sessions::{
 };
 use crate::secrets::{SecretStore, SharedSecretStore};
 use crate::settings::SettingsStore;
-use crate::state::{AppState, DEFAULT_PAGE_SIZE};
+use crate::state::{AppState, BrowseRequest, DEFAULT_PAGE_SIZE};
 use crate::validation_trace;
 use serde_json::json;
 
@@ -485,29 +485,6 @@ pub fn resolve_archive_directory(
         .map_err(ErrorDto::from)
 }
 
-/// Pages one directory level of an opened archive (500/page by default).
-#[tauri::command]
-pub fn list_entries(
-    window: WebviewWindow,
-    state: State<'_, Arc<AppState>>,
-    id: u64,
-    page: usize,
-    page_size: Option<usize>,
-    dir_prefix: Option<String>,
-    filter: Option<String>,
-) -> Result<Page, ErrorDto> {
-    state
-        .list_entries_for_window(
-            window.label(),
-            id,
-            page,
-            requested_page_size(page_size),
-            requested_dir_prefix(dir_prefix.as_deref()),
-            filter.as_deref(),
-        )
-        .map_err(ErrorDto::from)
-}
-
 /// Checks draft targets against the current window's complete archive index.
 #[tauri::command]
 pub async fn missing_archive_paths(
@@ -563,25 +540,24 @@ pub async fn plan_archive_move(
     .map_err(ErrorDto::from)
 }
 
-/// Pages archive-wide, case-insensitive path matches for an opened archive.
+/// Reads a page in the requested directory or archive-wide search order.
 #[tauri::command]
-pub async fn search_entries(
+pub async fn browse_entries(
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
     id: u64,
     page: usize,
     page_size: Option<usize>,
-    query: String,
-    generation: u64,
+    request: BrowseRequest,
 ) -> Result<Option<Page>, ErrorDto> {
     let state = Arc::clone(state.inner());
     let owner_window = window.label().to_owned();
     let page_size = requested_page_size(page_size);
     tauri::async_runtime::spawn_blocking(move || {
-        state.search_entries_for_window(&owner_window, id, page, page_size, &query, generation)
+        state.browse_entries_for_window(&owner_window, id, page, page_size, &request)
     })
     .await
-    .map_err(|error| ErrorDto::other(format!("archive search task failed: {error}")))?
+    .map_err(|error| ErrorDto::other(format!("archive listing failed: {error}")))?
     .map_err(ErrorDto::from)
 }
 
@@ -602,10 +578,6 @@ fn requested_page_size(page_size: Option<usize>) -> usize {
     page_size
         .unwrap_or(DEFAULT_PAGE_SIZE)
         .clamp(1, MAX_ARCHIVE_PAGE_SIZE)
-}
-
-fn requested_dir_prefix(dir_prefix: Option<&str>) -> &str {
-    dir_prefix.unwrap_or("")
 }
 
 /// All registered formats with capabilities (drives the compress dialog).

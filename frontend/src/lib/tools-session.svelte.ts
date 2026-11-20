@@ -331,7 +331,7 @@ export class ToolsSession {
 
   private showCopyFeedback(kind: CopyKind, taskId: number | null, message: string, tone: "success" | "danger"): void {
     this.#feedback = { kind, taskId, message, tone };
-    this.port.notice(message);
+    if (kind !== "task") this.port.notice(message);
     if (this.#feedbackTimer !== null) clearTimeout(this.#feedbackTimer);
     this.#feedbackTimer = setTimeout(() => this.clearCopyFeedback(), 2600);
   }

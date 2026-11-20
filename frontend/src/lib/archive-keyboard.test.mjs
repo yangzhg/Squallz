@@ -6,11 +6,14 @@ import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
-const { archiveKeyboardTarget, archiveTabStopPath } = await server.ssrLoadModule("/src/lib/archive-keyboard.ts");
+const { archiveKeyboardTarget, archiveTabStopPath, focusVirtualArchiveRow, handleArchiveNavigationKey }
+  = await server.ssrLoadModule("/src/lib/archive-keyboard.ts");
+const { displayArchiveEntry } = await server.ssrLoadModule("/src/lib/archive-browser.ts");
 const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
 
 function harness(names, overrides = {}) {
-  const context = { archiveKeyboardTarget, MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 42,
+  const context = { archiveKeyboardTarget, focusVirtualArchiveRow, handleArchiveNavigationKey,
+    MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 42, archiveBrowseGeneration: () => 0, modeSelectionBlocked: false,
     archiveKeyboardRequest: 0, taskReviewRequestGeneration: 0, screen: "browse", mode: "modern",
     currentArchive: { id: 1 }, archiveDirs: [], filterText: () => "", taskCenterOpen: false,
     blockingModalVisible: () => false, archiveSelectionBusyReason: () => "", tick: async () => {},
@@ -103,8 +106,7 @@ test("the row Tab stop follows focus, then selection, and remains available afte
   assert.equal(archiveTabStopPath([], null), null);
 });
 
-test("both archive browsers expose one row Tab stop with selection and open controls outside the Tab sequence", async () => {
-  const { render } = await server.ssrLoadModule("svelte/server");
+function archiveBrowserView() {
   const rows = Array.from({ length: 3 }, (_, index) => ({
     source: { path: `notes-${index}.txt`, entry_type: "file" }, virtualIndex: index,
     name: `notes-${index}.txt`, location: { path: "reports", label: "reports" }, type: "file", size: "1 KB", packed: "500 B",
@@ -112,16 +114,24 @@ test("both archive browsers expose one row Tab stop with selection and open cont
     selected: index === 1, previewing: false, previewBusy: false, selectionLabel: "Select item",
     previewActionLabel: "Open item", previewActionIcon: "eye",
   }));
-  const view = {
+  return {
     rows, startIndex: 0, totalRows: 3, rowsPending: false, paddingTop: 0, paddingBottom: 0,
+    sort: { key: "size", direction: "desc" },
     selection: { checked: false, mixed: true, disabled: false, label: "Select all", busy: false, busyLabel: "" },
     selectedSummary: "1 selected", editingStatus: null, conflict: null, structureWarning: null, recovery: null,
     archive: { title: "notes.zip", format: "ZIP", summary: "3 files", dirs: [], canGoUp: false },
-    actions: { enabled: {}, previewIcon: "eye" }, encodingWarning: null, filterText: "", filterPending: false,
+    actions: { enabled: { extract_all: true, extract_selection: true }, previewIcon: "eye",
+      extractAllLabel: "Extract all to…", extractSelectedLabel: "Extract selected (1)…" },
+    encodingWarning: null, filterText: "", filterPending: false,
     filterStatus: "3 files", emptyLabel: "No files", archiveTitle: "notes.zip", archiveFormatSummary: "ZIP",
     archiveOpen: true, openArchiveFirst: "Open an archive", emptyName: "No files", emptyStatus: "",
     preview: { nested: null, busy: false, failed: false, entry: null, canPreview: true, actionIcon: "eye" },
   };
+}
+
+test("both archive browsers expose one row Tab stop with selection and open controls outside the Tab sequence", async () => {
+  const { render } = await server.ssrLoadModule("svelte/server");
+  const view = archiveBrowserView();
   for (const name of ["ModernArchiveBrowser", "ClassicArchiveBrowser"]) {
     const { default: Browser } = await server.ssrLoadModule(`/src/components/${name}.svelte`);
     const { body } = render(Browser, { props: { view, tr: englishTranslate } });
@@ -141,6 +151,40 @@ test("both archive browsers expose one row Tab stop with selection and open cont
       assert.equal([...body.matchAll(/role="columnheader"/g)].length, 4);
       assert.doesNotMatch(body, /12345678/);
     }
+  }
+});
+
+test("both archive headers offer the same sortable columns and announce the active order", async () => {
+  const { render } = await server.ssrLoadModule("svelte/server");
+  const view = archiveBrowserView();
+  for (const name of ["ModernArchiveBrowser", "ClassicArchiveBrowser"]) {
+    const { default: Browser } = await server.ssrLoadModule(`/src/components/${name}.svelte`);
+    for (const [key, direction, aria] of [["size", "desc", "descending"], ["modified", "asc", "ascending"], [null, "asc", null]]) {
+      view.sort = { key, direction };
+      const { body } = render(Browser, { props: { view, tr: englishTranslate } });
+      const head = body.slice(body.indexOf('role="row"'), body.indexOf('role="rowgroup"'));
+      assert.deepEqual([...head.matchAll(/class="archive-sort-button"[^>]*>\s*(Name|Size|Modified)/g)].map(match => match[1]),
+        ["Name", "Size", "Modified"], name);
+      const sorted = [...head.matchAll(/aria-sort="([^"]+)"[^>]*>[\s\S]*?class="archive-sort-button"[^>]*>\s*(\w+)/g)]
+        .map(match => [match[1], match[2].toLowerCase()]);
+      assert.deepEqual(sorted, aria ? [[aria, key]] : [], name);
+    }
+  }
+});
+
+test("modern archive extraction gives the primary action the current scope", async () => {
+  const { render } = await server.ssrLoadModule("svelte/server");
+  const { default: Browser } = await server.ssrLoadModule("/src/components/ModernArchiveBrowser.svelte");
+  const view = archiveBrowserView();
+  for (const [mixed, checked] of [[false, false], [true, false], [false, true]]) {
+    view.selection = { ...view.selection, mixed, checked };
+    const { body } = render(Browser, { props: { view, tr: englishTranslate } });
+    const actions = body.slice(body.indexOf('class="summary-actions"'), body.indexOf('class="archive-tools"'));
+    const labels = [...actions.matchAll(/<button\b([^>]+)>([\s\S]*?)<\/button>/g)]
+      .map(([, attributes, contents]) => [attributes.includes("primary"), contents.replace(/<[^>]*>/g, "").trim()])
+      .filter(([, label]) => label.startsWith("Extract"));
+    const all = view.actions.extractAllLabel;
+    assert.deepEqual(labels, mixed || checked ? [[true, view.actions.extractSelectedLabel], [false, all]] : [[true, all]]);
   }
 });
 
@@ -168,7 +212,7 @@ test("opening a search result folder leaves feedback and focus with the latest v
 });
 
 test("loaded keyboard targets preserve range intent and ignore stale requests or changed selection", async () => {
-  for (const change of ["none", "descendant", "selection", "focus", "archive", "navigation", "mode", "modal", "tasks", "newer", "missing"]) {
+  for (const change of ["none", "descendant", "selection", "focus", "archive", "sort", "navigation", "mode", "modal", "tasks", "newer", "missing"]) {
     const waiting = deferred();
     const calls = [];
     const descendant = {};
@@ -180,7 +224,7 @@ test("loaded keyboard targets preserve range intent and ignore stale requests or
       selectedPaths: () => selection,
       selectRow: (row, index) => { calls.push(["anchor", index]); selection = new Set([row.path]); },
       loadRowAt: (index) => { calls.push(["load", index]); return waiting.promise; },
-      toDisplayEntry: row => ({ source: row }),
+      displayArchiveEntry, tr: englishTranslate,
       selectEntry: async (entry, event) => {
         calls.push(["select", entry.virtualIndex, event.shiftKey]);
         selection = new Set([...selection, entry.source.path]);
@@ -193,12 +237,15 @@ test("loaded keyboard targets preserve range intent and ignore stale requests or
     if (change === "selection") selection = new Set(["other.txt"]);
     if (change === "focus") document.activeElement = {};
     if (change === "archive") app.context.currentArchive = { id: 2 };
+    if (change === "sort") app.context.archiveBrowseGeneration = () => 1;
     if (change === "navigation") app.context.taskReviewRequestGeneration += 1;
     if (change === "mode") app.context.mode = "classic";
     if (change === "modal") app.context.blockingModalVisible = () => true;
     if (change === "tasks") app.context.taskCenterOpen = true;
     if (change === "newer") app.context.archiveKeyboardRequest += 1;
-    waiting.resolve(change === "missing" ? null : { path: "item-506.txt" });
+    waiting.resolve(change === "missing" ? null : {
+      path: "item-506.txt", display: "item-506.txt", entry_type: "file", encoding: "utf-8", size: 10,
+    });
     await pending;
     assert.deepEqual(calls, ["none", "descendant"].includes(change)
       ? [["load", 506], ["anchor", 498], ["select", 506, true], ["focus", 506, "item-506.txt"]]
@@ -206,23 +253,35 @@ test("loaded keyboard targets preserve range intent and ignore stale requests or
   }
 });
 
-test("focus restoration reveals overscan rows and rejects later navigation before focusing", async () => {
+test("focus restoration reveals overscan rows and rejects later navigation before focusing", async (t) => {
+  t.after(() => { delete globalThis.document; });
   for (const mode of ["modern", "classic"]) {
     const height = 42;
     for (const [index, scrollTop, expected] of [[12, 0, 3 * height], [4, 10 * height, 4 * height], [5, 0, 0]]) {
       const calls = [];
       const list = { clientHeight: 10 * height, scrollTop,
         querySelector: selector => ({ focus: () => calls.push(selector) }) };
-      const app = harness(["focusArchiveRow"], { mode, document: { querySelector: () => list },
-        loadRowAt: async () => ({ path: "target.txt" }), rowAt: () => ({ path: "target.txt" }) });
+      globalThis.document = { querySelector(selector) {
+        assert.equal(selector, `[data-virtual-list="${mode}"]`);
+        return list;
+      } };
+      const app = harness(["focusArchiveRow"], { mode, browseScrollTop: scrollTop, browseViewportHeight: 10 * height,
+        loadRowAt: async () => ({ path: "target.txt" }) });
       await app.focusArchiveRow(index, "target.txt");
       assert.equal(list.scrollTop, expected);
       assert.deepEqual(calls, [`[data-row-index="${index}"]`]);
       calls.length = 0;
       await app.focusArchiveRow(index, "target.txt", () => false);
       assert.deepEqual(calls, []);
-      app.context.tick = async () => { app.context.currentArchive = { id: 2 }; };
-      await app.focusArchiveRow(index, "target.txt");
+      const superseded = app.focusArchiveRow(index, "target.txt");
+      app.context.currentArchive = { id: 2 };
+      await superseded;
+      const loading = deferred();
+      app.context.loadRowAt = async () => { loading.resolve(); return { path: "target.txt" }; };
+      const sorted = app.focusArchiveRow(index, "target.txt");
+      await loading.promise;
+      app.context.archiveBrowseGeneration = () => 1;
+      await sorted;
       assert.deepEqual(calls, []);
     }
   }

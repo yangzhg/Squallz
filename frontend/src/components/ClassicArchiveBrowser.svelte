@@ -18,6 +18,7 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
   import ArchiveEntryLabel from "./ArchiveEntryLabel.svelte";
+  import ArchiveSortHeading from "./ArchiveSortHeading.svelte";
   import ArchiveEntryPreview from "./ArchiveEntryPreview.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
@@ -45,6 +46,7 @@
     onSubmitMoveReadyOnly,
     onSubmitMoveKeepBoth,
     onBrowseScroll,
+    onSort,
     onSelectEntry,
     onActivateEntry,
     onOpenResultFolder,
@@ -144,7 +146,7 @@
       data-total-rows={view.totalRows}
     >
       <div class="classic-head" role="row" aria-rowindex="1">
-        <span class="table-select-heading" role="columnheader">
+        <ArchiveSortHeading column="name" label={tr("gui.table.name")} sort={view.sort} {onSort} disabled={!view.archiveOpen}>
           <button
             type="button"
             class="row-select-toggle"
@@ -157,11 +159,10 @@
             disabled={view.selection.disabled}
             onclick={onToggleAllEntries}
           ></button>
-          <span>{tr("gui.table.name")}</span>
-        </span>
-        <span role="columnheader">{tr("gui.table.size")}</span>
+        </ArchiveSortHeading>
+        <ArchiveSortHeading column="size" label={tr("gui.table.size")} sort={view.sort} {onSort} disabled={!view.archiveOpen} />
         <span role="columnheader">{tr("gui.table.packed")}</span>
-        <span role="columnheader">{tr("gui.table.modified")}</span>
+        <ArchiveSortHeading column="modified" label={tr("gui.table.modified")} sort={view.sort} {onSort} disabled={!view.archiveOpen} />
         {#if detailsVisible}
           <span role="columnheader">{tr("gui.table.ratio")}</span>
           <span role="columnheader">{tr("gui.table.crc")}</span>

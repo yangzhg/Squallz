@@ -47,7 +47,9 @@
   let destinations = $derived(extractDestinationModes.map((mode) => {
     const busy = mode === "choose" && session.choosing;
     const reason = archiveRequiredReason || (busy ? session.pickerWait : "");
-    const label = busy ? tr("gui.extract.choosing_destination") : view.extractDestinationTitle(mode);
+    const label = busy ? tr("gui.extract.choosing_destination")
+      : mode === "choose" && variant === "modern" ? tr("gui.extract.pick_another_folder")
+      : view.extractDestinationTitle(mode);
     return { mode, busy, reason, label, detail: busy ? reason : view.extractDestinationDetail(mode) };
   }));
   onMount(() => bridge.onReady());
@@ -70,11 +72,12 @@
 {/snippet}
 {#if variant === "modern"}
   <div class="extract-view modern-extract">
-    <div class="sheet-head">
+    <header class="sheet-head">
       <div>
-        <span class="eyebrow">{tr("gui.extract.eyebrow")}</span>
         <h1 id="extract-workspace-heading" tabindex="-1">{title}</h1>
-        <p>{tr("gui.extract.safe_subtitle")}</p>
+        {#if session.archive}
+          <p class="extract-source"><Icon name="archive" size={15} />{bridge.archiveTitle}<span>· {view.extractSelectionLabel()}</span></p>
+        {/if}
       </div>
       <button
         class="primary sheet-action"
@@ -83,110 +86,81 @@
         aria-label={labelWithDisabledReason(startLabel, startBlockedReason)}
         onclick={() => void session.start()}
       ><Icon name="archive" size={17} />{startLabel}</button>
-    </div>
+    </header>
 
     <div class="extract-layout">
-      <section class="extract-main-panel">
-        <div class="extract-essentials-grid">
-          <div class="extract-destination-setup">
-            <div class="path-decision">
-              <span class="block-label">{view.extractDestinationFieldLabel()}</span>
-              <strong title={session.destination}>{session.destination}</strong>
-              {#if session.state.destinationMode === "smart"}<p>{tr("gui.extract.smart_tip")}</p>{/if}
-            </div>
-            <div class="destination-grid">
-              {#each destinations as choice (choice.mode)}
-                <button
-                  class:selected={session.state.destinationMode === choice.mode}
-                  aria-pressed={session.state.destinationMode === choice.mode}
-                  aria-busy={choice.busy}
-                  disabled={Boolean(choice.reason)}
-                  title={choice.reason}
-                  aria-label={labelWithDisabledReason(choice.label, choice.reason)}
-                  onclick={() => void session.selectDestination(choice.mode)}
-                >
-                  <strong>{choice.label}</strong>
-                  <span>{choice.detail}</span>
-                </button>
-              {/each}
-            </div>
-            <div class="extract-essentials-facts">
-              <div class="extract-essentials-fact">
-                <span>{tr("gui.inspector.archive")}</span>
-                <strong>{bridge.archiveTitle}</strong>
-                <p>{view.extractSelectionLabel()}</p>
-              </div>
-              <div class="extract-essentials-fact">
-                <span>{tr("gui.extract.password")}</span>
-                <strong>{bridge.password}</strong>
-              </div>
-            </div>
+      <div class="extract-essentials-grid">
+        <section class="extract-destination-setup" aria-labelledby="extract-destination-heading">
+          <h2 id="extract-destination-heading">{tr("common.destination")}</h2>
+          <div class="destination-grid" role="group" aria-labelledby="extract-destination-heading">
+            {#each destinations as choice (choice.mode)}
+              <button
+                class:selected={session.state.destinationMode === choice.mode}
+                aria-pressed={session.state.destinationMode === choice.mode}
+                aria-busy={choice.busy}
+                disabled={Boolean(choice.reason)}
+                title={choice.reason || choice.detail}
+                aria-label={labelWithDisabledReason(choice.label, choice.reason)}
+                onclick={() => void session.selectDestination(choice.mode)}
+              >
+                {#if session.state.destinationMode === choice.mode}<Icon name="check" size={15} />{/if}
+                {choice.label}
+              </button>
+            {/each}
           </div>
-          {@render planSummary()}
-        </div>
-
-        <ArchivePresetPicker instanceId={`${variant}-extract`} {variant} compact kind="extract" session={presets} />
-
-        <section class="extract-policy-panel" aria-label={tr("gui.extract.safety")}>
-          <div class="extract-policy-section">
-            <div class="extract-policy-heading">
-              <span class="block-label">{tr("gui.extract.conflict_policy")}</span>
-              <strong>{extractOverwriteLabel(session.state.overwrite)}</strong>
-            </div>
-            <div class="extract-policy-grid" aria-label={tr("gui.extract.conflict_policy")}>
-              {#each extractOverwriteModes as mode (mode)}
-                <button
-                  class:selected={session.state.overwrite === mode}
-                  aria-pressed={session.state.overwrite === mode}
-                  onclick={() => session.selectPolicy({ kind: "overwrite", value: mode })}
-                >{extractOverwriteLabel(mode)}</button>
-              {/each}
-            </div>
+          <div class="extract-destination-detail">
+            <span>{view.extractDestinationFieldLabel()}</span>
+            <strong>{session.destination}</strong>
+            {#if session.state.destinationMode === "smart" && session.archive}<p>{tr("gui.extract.smart_tip")}</p>{/if}
           </div>
-          <div class="extract-policy-section">
-            <div class="extract-policy-heading">
-              <span class="block-label">{tr("gui.extract.symlink_policy")}</span>
-              <strong>{extractSymlinkLabel(session.state.symlinks)}</strong>
-            </div>
-            <div
-              class="extract-symlink-grid"
-              role="group"
-              aria-label={tr("gui.extract.symlink_policy")}
-            >
-              {#each extractSymlinkModes as mode (mode)}
-                <button
-                  class:selected={session.state.symlinks === mode}
-                  aria-pressed={session.state.symlinks === mode}
-                  onclick={() => session.selectPolicy({ kind: "symlinks", value: mode })}
-                >{extractSymlinkLabel(mode)}</button>
-              {/each}
-            </div>
+          <div class="extract-policy-fields">
+            <label class="operation-field">
+              <span>{tr("gui.extract.conflict_policy")}</span>
+              <select class="operation-input" value={session.state.overwrite}
+                onchange={(event) => session.selectPolicy({ kind: "overwrite", value: event.currentTarget.value as ExtractOverwriteMode })}>
+                {#each extractOverwriteModes as mode (mode)}<option value={mode}>{extractOverwriteLabel(mode)}</option>{/each}
+              </select>
+            </label>
+            <label class="operation-field">
+              <span>{tr("gui.extract.symlink_policy")}</span>
+              <select class="operation-input" value={session.state.symlinks}
+                onchange={(event) => session.selectPolicy({ kind: "symlinks", value: event.currentTarget.value as ExtractSymlinkMode })}>
+                {#each extractSymlinkModes as mode (mode)}<option value={mode}>{extractSymlinkLabel(mode)}</option>{/each}
+              </select>
+            </label>
+          </div>
+          <div class="extract-password-note">
+            <Icon name="lock" size={16} />
+            <div><strong>{tr("gui.extract.password")}</strong><p>{bridge.password}</p></div>
           </div>
         </section>
+        {@render planSummary()}
+      </div>
 
-        <div class="extract-context-strip">
-          <div class="extract-context-item">
-            <span>{tr("gui.archive.encoding")}</span>
-            <strong>{view.extractEncodingLabel()}</strong>
-            <p>{session.archive ? bridge.warning : session.destination}</p>
-          </div>
-          <div class="extract-context-item">
-            <span>{tr("gui.extract.blocked_conditions")}</span>
-            <strong>{tr("gui.extract.safety_guards_on")}</strong>
-            <p>{tr("gui.extract.blocked_conditions_body")}</p>
-            {#if verification}<p>{verification}</p>{/if}
-          </div>
-        </div>
+      <ArchivePresetPicker instanceId={`${variant}-extract`} {variant} compact kind="extract" session={presets} />
 
-        <div class="extract-flow-actions">
-          <button
-            disabled={Boolean(archiveRequiredReason)}
-            title={archiveRequiredReason}
-            aria-label={labelWithDisabledReason(batchLabel, archiveRequiredReason)}
-            onclick={bridge.onBatch}
-          ><Icon name="list" size={16} />{batchLabel}</button>
+      <div class="extract-context-strip">
+        <div class="extract-context-item">
+          <span>{tr("gui.archive.encoding")}</span>
+          <strong>{view.extractEncodingLabel()}</strong>
+          <p>{session.archive ? bridge.warning : session.destination}</p>
         </div>
-      </section>
+        <div class="extract-context-item">
+          <span>{tr("gui.extract.blocked_conditions")}</span>
+          <strong>{tr("gui.extract.safety_guards_on")}</strong>
+          <p>{tr("gui.extract.blocked_conditions_body")}</p>
+          {#if verification}<p>{verification}</p>{/if}
+        </div>
+      </div>
+
+      <div class="extract-flow-actions">
+        <button
+          disabled={Boolean(archiveRequiredReason)}
+          title={archiveRequiredReason}
+          aria-label={labelWithDisabledReason(batchLabel, archiveRequiredReason)}
+          onclick={bridge.onBatch}
+        ><Icon name="list" size={16} />{batchLabel}</button>
+      </div>
     </div>
   </div>
 {:else}

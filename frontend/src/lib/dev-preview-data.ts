@@ -1,5 +1,6 @@
 import type {
   ArchiveInfo,
+  ArchiveSort,
   EntryDto,
   EntryPreviewDto,
   IntegrationStatusDto,
@@ -12,6 +13,29 @@ import type {
 import { parseTaskPreviewKind, type PreviewTaskKind } from "./task-preview";
 
 const passwordBookPreviewRequests = new Map<string, () => void>();
+
+/** Orders the in-memory sample archive before it is paged, like a desktop browse request. */
+export function sortPreviewEntries(rows: EntryDto[], sort: ArchiveSort): EntryDto[] {
+  const compare = (a: string | number, b: string | number) => a < b ? -1 : a > b ? 1 : 0;
+  const value = (entry: EntryDto) => {
+    if (sort.key === "name") return entry.display.toLowerCase();
+    if (sort.key === "size" && entry.entry_type === "dir") return null;
+    return entry[sort.key];
+  };
+  return rows.sort((a, b) => {
+    const folders = Number(b.entry_type === "dir") - Number(a.entry_type === "dir");
+    if (folders) return folders;
+    const first = value(a);
+    const second = value(b);
+    if (first === null || second === null) {
+      if (first !== second) return first === null ? 1 : -1;
+    } else {
+      const order = compare(first, second);
+      if (order) return sort.direction === "asc" ? order : -order;
+    }
+    return compare(a.path.toLowerCase(), b.path.toLowerCase());
+  });
+}
 let passwordBookPreviewStatus: PasswordBookStatus | null = null;
 
 export function readPasswordBookPreview(params: URLSearchParams): PasswordBookStatus | null {
@@ -506,10 +530,10 @@ function readArchivePreview(params: URLSearchParams, pageSize: number): ArchiveP
   const selected = listParam(params, "previewSelected", ",");
   const largeEntryCount = numericParam(params, "previewLargeEntries", 0);
   const pages = largeEntryCount > 0 ? largePreviewPages(largeEntryCount, pageSize) : null;
-  const rows = pages?.get(0) ?? entries.filter(
+  const rows = pages?.get(0) ?? sortPreviewEntries(entries.filter(
     (entry) => !entry.path.replace(/\/+$/g, "").includes("/"),
-  );
-  const previewRows = pages ? undefined : entries;
+  ), { key: "name", direction: "asc" });
+  const previewRows = pages ? Array.from(pages.values()).flat() : entries;
   const total = largeEntryCount > 0 ? largeEntryCount : rows.length;
 
   return {
@@ -581,7 +605,7 @@ export function previewSampleForEntry(
 function largePreviewEntry(index: number): EntryDto {
   const name = `file_${String(index).padStart(6, "0")}.txt`;
   return {
-    path: `files/${name}`,
+    path: name,
     display: name,
     entry_type: "file",
     size: index % 2 === 0 ? 0 : 128,

@@ -23,6 +23,10 @@ use crate::password_cache::{PasswordAttempt, SessionPasswords};
 use crate::preview_sessions::{PreviewResourceLease, PreviewResourceReservation};
 use squallz_core::lock_unpoisoned;
 
+mod browse_order;
+pub use browse_order::{BrowseLocation, BrowseRequest};
+use browse_order::{BrowseSort, ColumnOrder};
+
 /// Default page size of the entry list.
 pub const DEFAULT_PAGE_SIZE: usize = 500;
 const ARCHIVE_SOURCE_PREFIX: &str = "squallz-archive://";
@@ -131,6 +135,8 @@ enum SearchSourceSortKey {
 #[derive(Debug, Default)]
 struct SearchCache {
     query: String,
+    directory: Option<String>,
+    sort: Option<BrowseSort>,
     matches: Vec<SearchSource>,
 }
 
@@ -680,7 +686,14 @@ impl AppState {
         dir_prefix: &str,
         filter: Option<&str>,
     ) -> Result<Page, FormatError> {
-        self.list_entries_for_owner(None, id, page, page_size, dir_prefix, filter)
+        let archive = self.archive_for_owner(id, None)?;
+        Ok(page_level(
+            &archive,
+            page,
+            page_size.max(1),
+            dir_prefix,
+            filter,
+        ))
     }
 
     /// Resolves a browse location against the current archive's directory index.
@@ -694,6 +707,7 @@ impl AppState {
         Ok(resolve_archive_directory(&archive, dir_prefix))
     }
 
+    #[cfg(test)]
     pub(crate) fn list_entries_for_window(
         &self,
         owner_window: &str,
@@ -703,7 +717,61 @@ impl AppState {
         dir_prefix: &str,
         filter: Option<&str>,
     ) -> Result<Page, FormatError> {
-        self.list_entries_for_owner(Some(owner_window), id, page, page_size, dir_prefix, filter)
+        let request = BrowseRequest {
+            location: BrowseLocation::Directory {
+                prefix: dir_prefix.to_owned(),
+                filter: filter.map(str::to_owned),
+            },
+            generation: 0,
+            sort: None,
+        };
+        self.browse_entries_for_window(owner_window, id, page, page_size, &request)?
+            .ok_or(FormatError::Cancelled)
+    }
+
+    pub(crate) fn browse_entries_for_window(
+        &self,
+        owner: &str,
+        id: u64,
+        page: usize,
+        size: usize,
+        request: &BrowseRequest,
+    ) -> Result<Option<Page>, FormatError> {
+        let archive = self.archive_for_owner(id, Some(owner))?;
+        archive
+            .search_generation
+            .fetch_max(request.generation, Ordering::AcqRel);
+        let (directory, query) = match &request.location {
+            BrowseLocation::Directory { prefix, filter } => {
+                if request.sort.is_none() {
+                    return Ok(Some(page_level(
+                        &archive,
+                        page,
+                        size,
+                        prefix,
+                        filter.as_deref(),
+                    )));
+                }
+                (
+                    Some(prefix.as_str()),
+                    filter.as_deref().unwrap_or("").trim().to_lowercase(),
+                )
+            }
+            BrowseLocation::Search { query } => (None, fold_archive_search_query(query)),
+        };
+        let result = page_matches(
+            &archive,
+            page,
+            size,
+            &query,
+            directory,
+            request.sort,
+            request.generation,
+        );
+        if directory.is_some() && result.is_none() {
+            return Err(FormatError::Cancelled);
+        }
+        Ok(result)
     }
 
     pub(crate) fn missing_archive_paths_for_window(
@@ -750,25 +818,6 @@ impl AppState {
         )
     }
 
-    fn list_entries_for_owner(
-        &self,
-        owner_window: Option<&str>,
-        id: u64,
-        page: usize,
-        page_size: usize,
-        dir_prefix: &str,
-        filter: Option<&str>,
-    ) -> Result<Page, FormatError> {
-        let archive = self.archive_for_owner(id, owner_window)?;
-        Ok(page_level(
-            &archive,
-            page,
-            page_size.max(1),
-            dir_prefix,
-            filter,
-        ))
-    }
-
     /// Pages case-insensitive matches across every path in a cached archive.
     /// Exact and prefix file-name matches are returned before broader path
     /// matches while preserving a stable path order inside each group.
@@ -783,6 +832,7 @@ impl AppState {
         self.search_entries_for_owner(None, id, page, page_size, query, generation)
     }
 
+    #[cfg(test)]
     pub(crate) fn search_entries_for_window(
         &self,
         owner_window: &str,
@@ -792,7 +842,19 @@ impl AppState {
         query: &str,
         generation: u64,
     ) -> Result<Option<Page>, FormatError> {
-        self.search_entries_for_owner(Some(owner_window), id, page, page_size, query, generation)
+        self.browse_entries_for_window(
+            owner_window,
+            id,
+            page,
+            page_size,
+            &BrowseRequest {
+                location: BrowseLocation::Search {
+                    query: query.to_owned(),
+                },
+                sort: None,
+                generation,
+            },
+        )
     }
 
     fn search_entries_for_owner(
@@ -1131,14 +1193,16 @@ fn build_levels(
     Ok(indexed)
 }
 
-fn build_search_matches(
+fn build_matches(
     archive: &CachedArchive,
     query: &str,
+    directory: Option<&str>,
+    sort: Option<BrowseSort>,
     generation: u64,
 ) -> Option<Vec<SearchSource>> {
     let mut matches = Vec::new();
     let mut sequence = 0usize;
-    for (parent, rows) in &archive.levels {
+    let mut collect_level = |parent: &str, rows: &[Row]| -> Option<()> {
         for row in rows {
             if sequence.is_multiple_of(256)
                 && archive.search_generation.load(Ordering::Acquire) != generation
@@ -1152,12 +1216,17 @@ fn build_search_matches(
                 format!("{parent}{name}")
             };
             let folded_path = fold_archive_search_path(&full_path).into_boxed_str();
-            let rank = match rank_folded_archive_path(&folded_path, query) {
-                Some(rank) => rank,
-                None => {
+            let rank = if directory.is_some() {
+                if !query.is_empty() && !name.to_lowercase().contains(query) {
                     sequence += 1;
                     continue;
                 }
+                squallz_core::ArchivePathSearchRank::ExactName
+            } else if let Some(rank) = rank_folded_archive_path(&folded_path, query) {
+                rank
+            } else {
+                sequence += 1;
+                continue;
             };
             let source = match row.entry_index() {
                 Some(index) => SearchSource::Entry(index),
@@ -1169,11 +1238,30 @@ fn build_search_matches(
                     SearchSourceSortKey::SynthesizedDir(path.clone())
                 }
             };
+            let order = sort.map_or(ColumnOrder::Relevance(rank), |sort| {
+                sort.column_order(name, row.entry_index().map(|index| &archive.entries[index]))
+            });
             matches.push(SortItem {
-                key: (rank, folded_path, source_key, sequence),
+                key: (
+                    sort.is_some() && !row.is_dir(),
+                    order,
+                    folded_path,
+                    source_key,
+                    sequence,
+                ),
                 value: source,
             });
             sequence += 1;
+        }
+        Some(())
+    };
+    if let Some(prefix) = directory {
+        if let Some(rows) = archive.levels.get(prefix) {
+            collect_level(prefix, rows)?;
+        }
+    } else {
+        for (parent, rows) in &archive.levels {
+            collect_level(parent, rows)?;
         }
     }
     let sorted = cancellable_sort_with(matches, || {
@@ -1370,10 +1458,22 @@ fn page_search(
     generation: u64,
 ) -> Option<Page> {
     let query = fold_archive_search_query(query);
+    page_matches(archive, page, page_size, &query, None, None, generation)
+}
+
+fn page_matches(
+    archive: &CachedArchive,
+    page: usize,
+    page_size: usize,
+    query: &str,
+    directory: Option<&str>,
+    sort: Option<BrowseSort>,
+    generation: u64,
+) -> Option<Page> {
     if archive.search_generation.load(Ordering::Acquire) != generation {
         return None;
     }
-    if query.is_empty() {
+    if directory.is_none() && query.is_empty() {
         return Some(Page {
             total: 0,
             page,
@@ -1383,9 +1483,11 @@ fn page_search(
 
     let (total, page_matches) = {
         let mut cache = lock_unpoisoned(&archive.search_cache);
-        if cache.query != query {
-            let matches = build_search_matches(archive, &query, generation)?;
-            cache.query.clone_from(&query);
+        if cache.query != query || cache.sort != sort || cache.directory.as_deref() != directory {
+            let matches = build_matches(archive, query, directory, sort, generation)?;
+            cache.query = query.to_owned();
+            cache.directory = directory.map(str::to_owned);
+            cache.sort = sort;
             cache.matches = matches;
         }
 
@@ -2422,6 +2524,74 @@ mod tests {
         assert_eq!(f.total, 10); // f10..f19
         assert!(f.items.iter().all(|e| e.display.starts_with("f1")));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn browse_sort_orders_the_whole_view_and_rejects_stale_requests() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let state = AppState::new();
+        let mut entries: Vec<_> = (0..540)
+            .map(|n| file_meta(&format!("report-{n:03}"), n))
+            .collect();
+        entries[0].modified = Some(UNIX_EPOCH - Duration::from_secs(1));
+        entries[539].modified = Some(UNIX_EPOCH + Duration::from_secs(1));
+        entries.push(file_meta("nested/report", 700));
+        let mut archive = cached_archive(entries, 0);
+        archive.owner_window = Some("main".into());
+        lock_unpoisoned(&state.archives)
+            .archives
+            .insert(1, Arc::new(archive));
+        let read = |location: serde_json::Value, key: &str, direction: &str, index, generation| {
+            let request = serde_json::from_value(serde_json::json!({
+                "location": location, "sort": { "key": key, "direction": direction }, "generation": generation
+            })).unwrap();
+            state.browse_entries_for_window("main", 1, index, 1, &request)
+        };
+        let root = serde_json::json!({"kind":"directory","prefix":""});
+        let search = serde_json::json!({"kind":"search","query":"report"});
+        let path = |page: Option<Page>| page.unwrap().items.remove(0).path;
+        assert_eq!(
+            path(read(root.clone(), "size", "desc", 0, 1).unwrap()),
+            "nested/"
+        );
+        assert_eq!(
+            path(read(root.clone(), "size", "desc", 1, 1).unwrap()),
+            "report-539"
+        );
+        assert_eq!(
+            path(read(root.clone(), "size", "desc", 540, 1).unwrap()),
+            "report-000"
+        );
+        assert_eq!(
+            path(read(root.clone(), "name", "asc", 1, 2).unwrap()),
+            "report-000"
+        );
+        assert_eq!(
+            path(read(root.clone(), "name", "desc", 1, 3).unwrap()),
+            "report-539"
+        );
+        assert_eq!(
+            path(read(search.clone(), "size", "desc", 0, 4).unwrap()),
+            "nested/report"
+        );
+        assert_eq!(
+            path(read(search.clone(), "size", "asc", 0, 5).unwrap()),
+            "report-000"
+        );
+        assert_eq!(
+            path(read(search.clone(), "modified", "desc", 0, 6).unwrap()),
+            "report-539"
+        );
+        assert_eq!(
+            path(read(search.clone(), "modified", "asc", 0, 7).unwrap()),
+            "report-000"
+        );
+        assert!(read(search, "modified", "desc", 0, 6).unwrap().is_none());
+        assert!(matches!(
+            read(root, "name", "asc", 0, 3),
+            Err(FormatError::Cancelled)
+        ));
     }
 
     #[test]

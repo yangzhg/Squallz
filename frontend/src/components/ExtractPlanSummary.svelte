@@ -63,7 +63,7 @@
 >
   <header>
     <div>
-      <span>{eyebrow}</span>
+      {#if variant === "classic"}<span>{eyebrow}</span>{/if}
       <h2>{heading}</h2>
     </div>
     <strong class="extract-plan-status"><Icon name={statusIcon} size={15} />{statusLabel}</strong>

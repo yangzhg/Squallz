@@ -60,6 +60,7 @@
   import { onMount, tick } from "svelte";
   import Icon from "./Icon.svelte";
   import ArchiveEntryLabel from "./ArchiveEntryLabel.svelte";
+  import ArchiveSortHeading from "./ArchiveSortHeading.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
   import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
@@ -99,6 +100,7 @@
     onSearchKeydown,
     onClearSearch,
     onBrowseScroll,
+    onSort,
     onSelectEntry,
     onActivateEntry,
     onOpenResultFolder,
@@ -116,6 +118,7 @@
   let tools = $state<HTMLDetailsElement | null>(null);
   let focusedPath = $state<string | null>(null);
   const tabStopPath = $derived(archiveTabStopPath(view.rows, focusedPath));
+  const hasSelection = $derived(view.selection.checked || view.selection.mixed);
 
   $effect(() => {
     const trail = breadcrumbTrail;
@@ -170,12 +173,16 @@
       </div>
     </div>
     <div class="summary-actions">
-      <button class="large" class:primary={!view.actions.enabled.extract_selection} class:ghost={view.actions.enabled.extract_selection} disabled={!view.actions.enabled.extract_all} title={view.actions.extractDestinationHint} onclick={onExtractAll}>
-        <Icon name="archive" size={17} />{view.actions.extractAllLabel}
+      <button class="primary large"
+        disabled={!(hasSelection ? view.actions.enabled.extract_selection : view.actions.enabled.extract_all)}
+        title={view.actions.extractDestinationHint} onclick={hasSelection ? onExtractSelection : onExtractAll}>
+        <Icon name="archive" size={17} />{hasSelection ? view.actions.extractSelectedLabel : view.actions.extractAllLabel}
       </button>
-      <button class="large" class:primary={view.actions.enabled.extract_selection} class:ghost={!view.actions.enabled.extract_selection} disabled={!view.actions.enabled.extract_selection} title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
-        <Icon name="archive" size={17} />{view.actions.extractSelectedLabel}
-      </button>
+      {#if hasSelection}
+        <button class="ghost large" disabled={!view.actions.enabled.extract_all} title={view.actions.extractDestinationHint} onclick={onExtractAll}>
+          <Icon name="archive" size={17} />{view.actions.extractAllLabel}
+        </button>
+      {/if}
       <button
         class="ghost large"
         disabled={!view.actions.enabled.test_archive}
@@ -325,7 +332,7 @@
     aria-keyshortcuts="Meta+A Control+A"
   >
     <div class="list-head" role="row" aria-rowindex="1">
-      <span class="table-select-heading" role="columnheader">
+      <ArchiveSortHeading column="name" label={tr("gui.list.col.name")} sort={view.sort} {onSort}>
         <button
           type="button"
           class="row-select-toggle"
@@ -338,11 +345,10 @@
           disabled={view.selection.disabled}
           onclick={onToggleAllEntries}
         ></button>
-        <span>{tr("gui.list.col.name")}</span>
-      </span>
-      <span role="columnheader">{tr("gui.list.col.size")}</span>
+      </ArchiveSortHeading>
+      <ArchiveSortHeading column="size" label={tr("gui.list.col.size")} sort={view.sort} {onSort} />
       <span role="columnheader">{tr("gui.list.col.packed")}</span>
-      <span role="columnheader">{tr("gui.list.col.modified")}</span>
+      <ArchiveSortHeading column="modified" label={tr("gui.list.col.modified")} sort={view.sort} {onSort} />
     </div>
     <div
       class="virtual-scroll modern-virtual-scroll"
@@ -361,7 +367,7 @@
             aria-rowindex={(entry.virtualIndex ?? 0) + 2}
             aria-selected={entry.selected}
             tabindex={entry.source?.path === tabStopPath ? 0 : -1}
-            aria-keyshortcuts="ArrowUp ArrowDown Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Shift+Space Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
+            aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Home End PageUp PageDown Shift+ArrowUp Shift+ArrowDown Shift+Space Space Enter Backspace Meta+ArrowUp Alt+ArrowUp E"
             data-row-index={entry.virtualIndex ?? ""}
             onfocusin={() => focusedPath = entry.source?.path ?? null}
             onclick={(event) => onSelectEntry(entry, event)}

@@ -565,9 +565,6 @@ export function taskResultDetailTitle(task: TaskDialogModel): string {
     return tr("gui.task.recovery_protect_results");
   }
   if (isRecoveryDiagnosticTask(task)) return tr("gui.task.recovery_report");
-  if (task.spec.kind === "checksum" || task.spec.kind === "checksum_check") {
-    return tr("gui.task.checksum_results");
-  }
   if (task.spec.kind === "test") return tr("gui.task.archive_test_report");
   if (task.spec.kind === "compress") return tr("gui.task.create_results");
   if (task.spec.kind === "convert") return tr("gui.task.convert_results");

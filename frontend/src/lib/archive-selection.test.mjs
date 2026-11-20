@@ -285,6 +285,30 @@ test("range selection uses search-result ordering instead of directory pages", a
   });
 });
 
+test("sorting keeps checked paths and uses the same order for every requested page", async () => {
+  await withArchive(async (archive, ipc) => {
+    const entries = manyRows(1_010);
+    installPages(archive, entries, [0]);
+    archive.selectRow(entries[0], 0);
+    const calls = [];
+    ipc.listEntries = async (_id, page, _dir, _filter, size, sort, generation) => {
+      calls.push({ page, sort, generation });
+      const ordered = sort.direction === "desc" ? entries.toReversed() : entries;
+      return { page, total: entries.length, items: ordered.slice(page * size, (page + 1) * size) };
+    };
+    await archive.sortArchiveRows("size");
+    assert.deepEqual([...archive.selectedPaths()], [entries[0].path]);
+    assert.equal(archive.rowAt(0).path, entries.at(-1).path);
+    assert.equal((await archive.loadRowAt(503)).path, entries.at(-504).path);
+    assert.equal(await archive.selectAllRows(), "selected");
+    assert.equal(calls.at(-1).page, 2);
+    assert.ok(calls.every(({ sort, generation }) => sort.key === "size" && sort.direction === "desc" && generation === calls[0].generation));
+    await archive.sortArchiveRows("size");
+    assert.equal(archive.rowAt(0).path, entries[0].path);
+    assert.equal(archive.allCurrentRowsSelected(), true);
+  });
+});
+
 test("failed, cancelled, short, or changed pages never publish a partial selection", async () => {
   await withArchive(async (archive, ipc) => {
     const entries = manyRows(1_010);

@@ -464,9 +464,34 @@ test("completed task surfaces prioritize outcomes and next steps before scrollab
       const nextStep = body.indexOf('class="task-next-step');
       const details = body.indexOf('class="task-result-details');
       assert.ok(outcome >= 0 && nextStep > outcome && details > nextStep);
-      assert.match(body, /class="task-result-detail-list" role="region"[^>]*tabindex="0"/u);
+      assert.match(body, /<dl class="task-result-detail-list">/u);
+      assert.match(body, /class="task-modal-body" role="region"[^>]*tabindex="0"/u);
       assert.ok(body.includes("/output"), "the original result and output remain available");
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test("checksum task previews distinguish like-named files and identify missing digests", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
+    const { loadLocale, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    await loadLocale("en-US");
+    const { surface } = await taskSurface("dialog", server);
+    const items = Array.from({ length: 7 }, (_, index) => ({
+      path: `dir-${index}/report.txt`, expected: "expected-only", actual: null, error: "File missing", ok: false,
+    }));
+    const task = { ...extractTask("done"), spec: { kind: "checksum_check", manifest: "/SUMS", algorithm: "sha256" },
+      result: jobResult("checksum_check", { items, passed: 0, failed: items.length, checked: items.length, ok: false }) };
+    const body = render(TaskProgressDialog, { props: { ...surface, task } }).body;
+    assert.match(body, /dir-0\/report\.txt/u);
+    assert.match(body, /dir-5\/report\.txt/u);
+    assert.doesNotMatch(body, /dir-6|expected-only/u);
+    assert.ok(body.includes("File missing"));
+    assert.ok(body.includes(tFallback("gui.checksum.result_range").replace("{start}", "1").replace("{end}", "6").replace("{total}", "7")));
   } finally {
     await server.close();
   }
@@ -495,9 +520,6 @@ test("window task surfaces fill their host and keep scrollable content inside th
   assert.match(card.padding, /^var\(--/u);
   assert.equal(declarations(".task-modal-body").overflow, "auto");
   assert.equal(declarations('.task-modal-card[data-task-question="true"]')["grid-template-rows"], "auto minmax(0, 1fr)");
-  for (const selector of [".task-result-detail-list", ".task-checksum-table"]) {
-    assert.equal(declarations(selector).overflow, "auto");
-    assert.match(declarations(selector)["max-height"], /^var\(--/u);
-  }
+  assert.equal(declarations(".task-result-detail-list .scrollable").overflow, "auto");
   assert.equal(declarations(".task-modal-overlay").position, "fixed");
 });

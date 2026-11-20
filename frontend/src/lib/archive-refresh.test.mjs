@@ -886,24 +886,20 @@ test("navigation to a missing folder displays a real parent instead of a phantom
   });
 });
 
-test("virtual rows keep cold and mixed page slots and clamp after the list shrinks", async () => {
+test("virtual rows keep cold and mixed page slots and clamp after the list shrinks", async (t) => {
   const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
-  const [declaration] = selectFunctions(source, ["browseVirtualWindow"]);
-  const outputText = compileTestScript(declaration.getText(source), { target: ts.ScriptTarget.ES2022 });
-  for (const total of [0, 1, 25, 501]) {
-    const window = vm.runInNewContext(`${outputText}\nbrowseVirtualWindow()`, {
-      currentArchive: info(), totalRows: () => total, browseScrollTop: 40_000,
-      browseViewportHeight: 400, MODERN_ROW_HEIGHT: 40, VIRTUAL_OVERSCAN_ROWS: 5,
-    });
-    assert.ok(window.start <= window.end);
-    assert.ok(window.end <= total);
-    assert.ok(window.top <= total * 40);
-    assert.equal(window.top + (window.end - window.start) * 40 + window.bottom, total * 40);
-  }
-  const names = ["browseVirtualWindow", "browseEntries", "browsePaddingTop", "browsePaddingBottom", "toDisplayEntry", "archiveBrowserSurface", "onBrowseVirtualScroll"];
+  const names = ["browseVirtualWindow", "browseEntries", "archiveBrowserSurface", "onBrowseVirtualScroll"];
   const helpers = selectFunctions(source, names);
   const runtime = compileTestScript(helpers.map((node) => node.getText(source)).join("\n"), { target: ts.ScriptTarget.ES2022 });
   await withArchive(async ({ server, archive, ipc, requests }) => {
+    const { archiveRowWindow, displayArchiveEntry } = await server.ssrLoadModule("/src/lib/archive-browser.ts");
+    for (const total of [0, 1, 25, 501]) {
+      const window = archiveRowWindow(total, 40, 40_000, 400);
+      assert.ok(window.start <= window.end);
+      assert.ok(window.end <= total);
+      assert.ok(window.top <= total * 40);
+      assert.equal(window.top + (window.end - window.start) * 40 + window.bottom, total * 40);
+    }
     const cached = Array.from({ length: 500 }, (_, index) => row(`entry-${index}.txt`));
     archive.installArchivePreview(info(), cached, { total: 10_000 });
     const pendingPages = new Map();
@@ -918,8 +914,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
       totalRows: archive.totalRows, rowAt: archive.rowAt, prefetchAround: archive.prefetchAround,
       archiveBrowseError: archive.archiveBrowseError, filterPending: archive.filterPending, filterText: archive.filterText,
       browseScrollTop: 0, browseViewportHeight: 420, MODERN_ROW_HEIGHT: 42, CLASSIC_ROW_HEIGHT: 42,
-      VIRTUAL_OVERSCAN_ROWS: 12, entryType: (entry) => entry.entry_type,
-      formatBytes: String, formatModified: () => "", entryAttributeLabel: () => "File",
+      archiveRowWindow, displayArchiveEntry, archiveSort: archive.archiveSort,
       tr: englishTranslate, isEntrySelected: () => false,
       isEntryPreviewActive: () => false, isEntryPreviewBusy: () => false,
       entrySelectionLabel: () => "Select", previewEntryActionLabel: () => "Preview", previewActionIcon: () => "eye",
@@ -978,6 +973,26 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
       total: 10_000, page: 19 });
     await retrying;
     assert.ok(checkSlots(modern, 42, false).rows.every(Boolean));
+    await t.test("sorting from the last page resets the scroll container before rendering the first rows", () => {
+      for (const mode of ["modern", "classic"]) {
+        const list = { scrollTop: 9_990 * 42, clientHeight: 420 };
+        onScroll({ currentTarget: list });
+        context.mode = mode;
+        context.document = { querySelector(selector) {
+          assert.equal(selector, `[data-virtual-list="${mode}"]`);
+          return list;
+        } };
+        context.archiveKeyboardRequest = 0;
+        context.blockSelectionScopedAction = () => false;
+        context.sortArchiveRows = (key) => {
+          assert.equal(key, "size");
+          assert.equal(list.scrollTop, 0);
+          assert.equal(app.browseVirtualWindow(42).start, 0);
+        };
+        app.archiveBrowserSurface(42).onSort("size");
+      }
+    });
+    scrollTo(10_000 * 42);
     archive.installArchivePreview(info(2), cached.slice(0, 25), { total: 25 });
     assert.ok(checkSlots(modern, 42, false).rows.every(Boolean));
     assert.equal(archive.totalRows(), 25);

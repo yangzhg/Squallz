@@ -19,7 +19,11 @@
   import type { ArchiveEditingState } from "./components/ArchiveEditingStatus.svelte";
   import AppIcon from "./components/AppIcon.svelte";
   import ClassicArchiveBrowserHost from "./components/ClassicArchiveBrowserHost.svelte";
-  import type { ArchiveBrowserActions, ArchiveBrowserView, ArchivePreviewActions, ArchivePreviewView, DisplayEntry } from "./lib/archive-browser";
+  import {
+    archiveRowWindow, displayArchiveEntry,
+    type ArchiveBrowserActions, type ArchiveBrowserView, type ArchivePreviewActions,
+    type ArchivePreviewView, type BrowserEntry, type DisplayEntry,
+  } from "./lib/archive-browser";
   import type { ClassicArchiveBrowserSurfaceProps } from "./components/ClassicArchiveBrowserHost.svelte";
   import ArchiveOperationWorkspaceHost from "./components/ArchiveOperationWorkspaceHost.svelte";
   import type {
@@ -66,7 +70,7 @@
   import { createContentPolicyLabel, extractOverwriteLabel } from "./lib/archive-option-labels";
   import { archiveSelectionRoots } from "./lib/archive-editing";
   import { ArchiveEditSession, type ArchiveEditKind, type ArchiveEditOwner, type ArchiveMoveReview, type ArchiveEditEffect } from "./lib/archive-edit-session.svelte";
-  import { archiveKeyboardTarget } from "./lib/archive-keyboard";
+  import { archiveKeyboardTarget, focusVirtualArchiveRow, handleArchiveNavigationKey } from "./lib/archive-keyboard";
   import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
   import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
   import { restoreModalFocus, trapModalFocus } from "./lib/modal-focus";
@@ -77,6 +81,8 @@
     archive,
     archiveBrowseError,
     archiveBrowseGeneration,
+    archiveSort,
+    sortArchiveRows,
     archiveRefreshStatus,
     archiveOpenError,
     archivePasswordBookStatus,
@@ -713,7 +719,6 @@
   let entryContextReturnFocus = $state<HTMLElement | null>(null);
   const MODERN_ROW_HEIGHT = 42;
   const CLASSIC_ROW_HEIGHT = 42;
-  const VIRTUAL_OVERSCAN_ROWS = 12;
 
   const longTailBridgeFormatIds = new Set([
     "apfs",
@@ -2260,21 +2265,11 @@
 
   function archiveBrowserSurface(rowHeight: number): ArchiveBrowserActions & ArchivePreviewActions & { view: ArchiveBrowserView } {
     const recovery = archiveBrowseRecoveryState();
-    const rows = browseEntries(rowHeight).map((entry) => entry ? ({
-      ...entry,
-      selected: isEntrySelected(entry),
-      previewing: isEntryPreviewActive(entry),
-      previewBusy: isEntryPreviewBusy(entry),
-      selectionLabel: entrySelectionLabel(entry),
-      previewActionLabel: entry.source
-        ? previewEntryActionLabel(entry)
-        : "",
-      previewActionIcon: entry.source
-        ? previewActionIcon(entry.source.path, entry.source.entry_type)
-        : "eye",
-    }) : null);
+    const window = browseVirtualWindow(rowHeight);
+    const rows = browseEntries(window);
     return {
       view: {
+        sort: archiveSort(),
         selection: archiveSelectionControl(),
         selectedSummary: selectedSummary(),
         editingStatus: archiveEditingStatus(),
@@ -2283,12 +2278,20 @@
         recovery,
         totalRows: currentArchive ? totalRows() : 0,
         rows,
-        startIndex: browseVirtualWindow(rowHeight).start,
+        startIndex: window.start,
         rowsPending: !archiveBrowseError() && (filterPending() || rows.some((entry) => entry === null)),
-        paddingTop: browsePaddingTop(rowHeight),
-        paddingBottom: browsePaddingBottom(rowHeight),
+        paddingTop: window.top,
+        paddingBottom: window.bottom,
       },
       tr,
+      onSort: (key) => {
+        if (blockSelectionScopedAction()) return;
+        const list = document.querySelector<HTMLElement>(`[data-virtual-list="${mode}"]`);
+        if (list) list.scrollTop = 0;
+        browseScrollTop = 0;
+        archiveKeyboardRequest += 1;
+        void sortArchiveRows(key);
+      },
       onOpenRoot: () => void openArchiveBreadcrumb(-1),
       onOpenRecovery: openCurrentArchiveRecoveryConfiguration,
       onRetryBrowse: () => void retryArchiveContents(),
@@ -3299,87 +3302,34 @@
     recordValidationRenderReady(`recovery-open:${source}`);
   }
 
-  function entryType(row: EntryDto): string {
-    if (row.entry_type === "dir") return "folder";
-    if (row.encrypted) return "locked";
-    if (row.encoding !== "utf-8" || row.display.includes("\uFFFD")) return "warning";
-    return "file";
+  function browseVirtualWindow(rowHeight: number) {
+    return archiveRowWindow(currentArchive ? totalRows() : 0, rowHeight, browseScrollTop, browseViewportHeight);
   }
 
-  function entryAttributeLabel(row: EntryDto): string {
-    const parts: string[] = [];
-    if (row.entry_type === "dir") parts.push(tr("gui.attr.folder"));
-    else if (row.entry_type === "symlink") parts.push(tr("gui.attr.symlink"));
-    else if (row.entry_type === "hardlink") parts.push(tr("gui.attr.hardlink"));
-    else if (row.entry_type === "other") parts.push(tr("gui.attr.other"));
-    else parts.push(tr("gui.attr.file"));
-    if (row.encrypted) parts.push(tr("gui.attr.encrypted"));
-    if (row.encoding !== "utf-8" || row.display.includes("\uFFFD")) parts.push(tr("gui.attr.encoding_review"));
-    return parts.join(" · ");
-  }
-
-  function toDisplayEntry(row: EntryDto): DisplayEntry {
-    const ratio =
-      row.compressed && row.size > 0 ? `${Math.round((row.compressed / row.size) * 100)}%` : "-";
-    let location: DisplayEntry["location"] = null;
-    if (filterText().trim()) {
-      const path = row.path.replaceAll("\\", "/").replace(/\/+$/g, "");
-      const parent = path.slice(0, Math.max(0, path.lastIndexOf("/")));
-      location = { path: parent, label: parent || tr("gui.list.archive_root") };
-    }
-    return {
-      name: row.display,
-      location,
-      type: entryType(row),
-      size: row.entry_type === "dir" ? "-" : formatBytes(row.size),
-      packed: row.compressed == null ? "-" : formatBytes(row.compressed),
-      ratio,
-      modified: formatModified(row.modified),
-      crc: row.crc == null ? "" : row.crc.toString(16).toUpperCase().padStart(8, "0"),
-      encoding: row.encoding.toUpperCase(),
-      attr: entryAttributeLabel(row),
-      source: row,
-    };
-  }
-
-  function browseEntries(rowHeight = MODERN_ROW_HEIGHT): (DisplayEntry | null)[] {
+  function browseEntries(window: ReturnType<typeof archiveRowWindow>): (BrowserEntry | null)[] {
     if (!currentArchive) return [];
-    const window = browseVirtualWindow(rowHeight);
-    const rows: (DisplayEntry | null)[] = [];
     prefetchAround(window.start);
     prefetchAround(Math.max(window.end - 1, 0));
+    const showLocation = Boolean(filterText().trim());
+    const entries: (BrowserEntry | null)[] = [];
     for (let index = window.start; index < window.end; index += 1) {
       const row = rowAt(index);
-      rows.push(row ? { ...toDisplayEntry(row), virtualIndex: index } : null);
+      if (!row) {
+        entries.push(null);
+        continue;
+      }
+      const entry = displayArchiveEntry(row, index, showLocation, tr);
+      entries.push({
+        ...entry,
+        selected: isEntrySelected(entry),
+        previewing: isEntryPreviewActive(entry),
+        previewBusy: isEntryPreviewBusy(entry),
+        selectionLabel: entrySelectionLabel(entry),
+        previewActionLabel: previewEntryActionLabel(entry),
+        previewActionIcon: previewActionIcon(row.path, row.entry_type),
+      });
     }
-    return rows;
-  }
-
-  function browseVirtualWindow(rowHeight = MODERN_ROW_HEIGHT) {
-    const total = currentArchive ? totalRows() : 0;
-    if (!currentArchive) return { start: 0, end: total, top: 0, bottom: 0 };
-    const viewport = Math.max(browseViewportHeight || 360, rowHeight * 6);
-    const visibleRows = Math.ceil(viewport / rowHeight);
-    const rawStart = Math.min(
-      Math.floor(browseScrollTop / rowHeight),
-      Math.max(0, total - visibleRows),
-    );
-    const start = Math.max(0, rawStart - VIRTUAL_OVERSCAN_ROWS);
-    const end = Math.min(total, start + visibleRows + VIRTUAL_OVERSCAN_ROWS * 2);
-    return {
-      start,
-      end,
-      top: start * rowHeight,
-      bottom: Math.max(0, (total - end) * rowHeight),
-    };
-  }
-
-  function browsePaddingTop(rowHeight = MODERN_ROW_HEIGHT): number {
-    return browseVirtualWindow(rowHeight).top;
-  }
-
-  function browsePaddingBottom(rowHeight = MODERN_ROW_HEIGHT): number {
-    return browseVirtualWindow(rowHeight).bottom;
+    return entries;
   }
 
   function onBrowseVirtualScroll(event: Event) {
@@ -3503,7 +3453,7 @@
     const origin = previewSession.clear();
     if (restoreEntryFocus && origin && origin.virtualIndex !== null) {
       const { virtualIndex, entryPath } = origin;
-      queueMicrotask(() => void focusArchiveRow(virtualIndex, entryPath));
+      void focusArchiveRow(virtualIndex, entryPath);
     }
   }
 
@@ -3807,23 +3757,7 @@
 
   function onEntryKeydown(event: KeyboardEvent, entry: DisplayEntry) {
     if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
-    if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && event.currentTarget instanceof HTMLElement) {
-      const label = event.currentTarget.querySelector<HTMLElement>(".archive-entry-label");
-      if (label && label.scrollWidth > label.clientWidth) {
-        const offset = event.key === "ArrowLeft" ? -label.clientWidth : label.clientWidth;
-        const next = Math.max(0, Math.min(label.scrollWidth - label.clientWidth, label.scrollLeft + offset));
-        if (next !== label.scrollLeft) {
-          event.preventDefault();
-          label.scrollLeft = next;
-        }
-      }
-      return;
-    }
-    if (["ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
-      event.preventDefault();
-      void moveArchiveRow(event, entry);
-      return;
-    }
+    if (handleArchiveNavigationKey(event, () => void moveArchiveRow(event, entry))) return;
     if (event.target !== event.currentTarget) return;
     if (
       archiveSelectionBusyReason()
@@ -3882,11 +3816,12 @@
     if (index === null) return;
     const request = ++archiveKeyboardRequest;
     const archiveId = currentArchive.id;
+    const generation = archiveBrowseGeneration();
     const listMode = mode;
     const navigation = taskReviewRequestGeneration;
     const previousSelection = selectedPaths();
     const contextIsCurrent = () => request === archiveKeyboardRequest && screen === "browse"
-      && currentArchive?.id === archiveId && mode === listMode
+      && currentArchive?.id === archiveId && archiveBrowseGeneration() === generation && mode === listMode
       && taskReviewRequestGeneration === navigation
       && !blockingModalVisible() && !taskCenterOpen;
     const isCurrent = () => contextIsCurrent() && origin.contains(document.activeElement);
@@ -3894,7 +3829,7 @@
     if (!row || !isCurrent() || selectedPaths() !== previousSelection) return;
     // A keyboard range starts at the focused row even when Tab reached it without selecting it.
     if (event.shiftKey && previousSelection.size === 0 && entry.source) selectRow(entry.source, entry.virtualIndex);
-    await selectEntry({ ...toDisplayEntry(row), virtualIndex: index }, event);
+    await selectEntry(displayArchiveEntry(row, index, Boolean(filterText().trim()), tr), event);
     if (!isCurrent() || !selectedPaths().has(row.path)) return;
     await focusArchiveRow(index, row.path, () => contextIsCurrent()
       && (origin.contains(document.activeElement) || (!origin.isConnected && document.activeElement === document.body)));
@@ -5480,36 +5415,18 @@
   async function focusArchiveRow(index: number, entryPath: string | null, canFocus: () => boolean = () => true): Promise<void> {
     if (screen !== "browse" || !currentArchive) return;
     const archiveId = currentArchive.id;
-    const directoryKey = archiveDirs.join("\u0000");
-    const filterKey = filterText();
+    const generation = archiveBrowseGeneration();
+    const navigation = taskReviewRequestGeneration;
     const listMode = mode;
-    const listKind = listMode === "classic" ? "classic" : "modern";
-    const selector = `[data-row-index="${index}"]`;
-    const contextIsCurrent = () => (
-      screen === "browse" &&
-      currentArchive?.id === archiveId &&
-      archiveDirs.join("\u0000") === directoryKey &&
-      filterText() === filterKey &&
-      mode === listMode && canFocus()
-    );
-    const rowMatches = () => !entryPath || rowAt(index)?.path === entryPath;
-
-    await tick();
-    if (!contextIsCurrent()) return;
-    const list = document.querySelector<HTMLElement>(`[data-virtual-list="${listKind}"]`);
-    if (!list) return;
-    const rowHeight = listMode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT;
-    const top = index * rowHeight;
-    const nextScrollTop = Math.max(0, Math.min(top, Math.max(list.scrollTop, top + rowHeight - list.clientHeight)));
-    if (nextScrollTop !== list.scrollTop) {
-      list.scrollTop = nextScrollTop;
-      browseScrollTop = nextScrollTop;
-      browseViewportHeight = list.clientHeight;
-    }
-    if (!await loadRowAt(index)) return;
-    await tick();
-    if (!contextIsCurrent() || !rowMatches()) return;
-    list.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
+    await focusVirtualArchiveRow(index, entryPath, {
+      mode: listMode,
+      rowHeight: listMode === "classic" ? CLASSIC_ROW_HEIGHT : MODERN_ROW_HEIGHT,
+      canFocus: () => screen === "browse" && currentArchive?.id === archiveId && mode === listMode
+        && archiveBrowseGeneration() === generation && taskReviewRequestGeneration === navigation
+        && !blockingModalVisible() && !taskCenterOpen && !modeSelectionBlocked && canFocus(),
+      loadRowAt,
+      setViewport: (top, height) => { browseScrollTop = top; browseViewportHeight = height; },
+    });
   }
 
   async function openNestedPreviewArchive() {
@@ -7282,10 +7199,6 @@
             <button onclick={() => setScreen("browse")}><Icon name="archive" size={16} />{tr("gui.settings.back_to_archives")}</button>
           {:else if currentArchive || screen === "recent"}
             <button disabled={!appActionEnabled("open_archive")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
-            {#if screen === "browse" && currentArchive}
-              {@const action = currentExtractAction()}
-              <button disabled={!appActionEnabled(action)} title={archiveSelectionBusyReason() || extractView.extractDestinationHint()} onclick={() => void runAppAction(action)}><Icon name="archive" size={16} />{tr(action === "extract_selection" ? "gui.action.extract_selected" : "gui.action.extract_all")}</button>
-            {/if}
           {/if}
           {#if !isSettingsScreen()}
             <button

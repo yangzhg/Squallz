@@ -9,9 +9,11 @@ const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.
 let server;
 let actions;
 let ArchiveEditSession;
+let handleArchiveNavigationKey;
 before(async () => {
   server = await createTestServer();
   actions = await server.ssrLoadModule("/src/lib/app-actions.ts");
+  ({ handleArchiveNavigationKey } = await server.ssrLoadModule("/src/lib/archive-keyboard.ts"));
   ({ ArchiveEditSession } = await server.ssrLoadModule("/src/lib/archive-edit-session.svelte.ts"));
 });
 after(async () => server?.close());
@@ -95,6 +97,7 @@ test("checkbox focus permits archive select-all without taking text editing away
 
 async function appHandlers(overrides = {}, names = ["onEntryKeydown", "runEntryContextAction"]) {
   const context = {
+    handleArchiveNavigationKey,
     archiveSelectionBusyReason: () => "",
     tick: () => Promise.resolve(),
     ...overrides,

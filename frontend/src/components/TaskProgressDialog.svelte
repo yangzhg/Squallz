@@ -60,7 +60,6 @@
     tr,
   } from "../lib/task-dialog";
   import { taskCanPublishMacosSfx } from "../lib/macos-sfx-publish";
-  import { basename as pathBaseName } from "../lib/format";
 
   type TaskAction = (task: TaskDialogModel) => void;
   type TaskAsyncAction = (task: TaskDialogModel) => void | Promise<void>;
@@ -157,6 +156,7 @@
   let passwordErrorId = $derived(taskElementId("password-error"));
   let actionFailure = $derived(taskActionFailureMessage(task));
   let passwordFeedback = $derived(passwordError || actionFailure);
+  let focusIdentity = $derived(`${presentation}:${task.id ?? "submitting"}:${Boolean(passwordQuestion)}:${Boolean(conflictQuestion)}`);
 
   function taskElementId(suffix: string): string {
     const taskId = task.id === null ? "submitting" : task.id.toString();
@@ -208,7 +208,6 @@
   }
 
   $effect(() => {
-    const focusIdentity = `${presentation}:${task.id ?? "submitting"}:${Boolean(passwordQuestion)}:${Boolean(conflictQuestion)}`;
     void focusIdentity;
     void tick().then(() => {
       const target = passwordInput ?? taskCard;
@@ -313,10 +312,8 @@
         </div>
       </section>
       <section class="task-next-step" aria-label={tr("gui.task.next_step")}>
-        <div>
-          <strong>{tr("gui.task.next_step")}</strong>
-          <span>{taskNextStepDetail(task, taskWindowMode)}</span>
-        </div>
+        <strong>{tr("gui.task.next_step")}</strong>
+        <span>{taskNextStepDetail(task, taskWindowMode)}</span>
       </section>
     {/if}
     {#if taskPhaseControlNoticeVisible(task)}
@@ -505,38 +502,48 @@
           </button>
         </div>
       {/if}
-      {#if (task.spec.kind === "checksum" || task.spec.kind === "checksum_check") && taskChecksumItems(task).length > 0}
-        {@const checksumRows = taskChecksumItems(task).slice(0, task.expanded ? 20 : 6)}
+      {@const checksumItems = taskChecksumItems(task)}
+      {#if (task.spec.kind === "checksum" || task.spec.kind === "checksum_check") && checksumItems.length > 0}
+        {@const checksumRows = checksumItems.slice(0, task.expanded ? 20 : 6)}
         <section class="task-checksum-result" aria-label={tr("gui.task.checksum_results")}>
           <div class="task-checksum-head">
             <div>
               <strong>{tr("gui.task.checksum_results")}</strong>
-              <span>{tr("gui.checksum.result_rows").replace("{count}", taskChecksumItems(task).length.toLocaleString())}</span>
+              <span>{checksumRows.length === checksumItems.length
+                ? tr("gui.checksum.result_rows").replace("{count}", checksumRows.length.toLocaleString())
+                : tr("gui.checksum.result_range").replace("{start}", "1").replace("{end}", checksumRows.length.toLocaleString()).replace("{total}", checksumItems.length.toLocaleString())}</span>
               {#if copyFeedback}
                 <small class="checksum-copy-status" class:danger={copyFeedbackTone === "danger"} role="status">{copyFeedback}</small>
               {/if}
             </div>
-            <button type="button" class="primary-lite" disabled={copyPending} aria-busy={copyPending} onclick={() => void onCopyChecksumResults(task)}>
+            <button
+              type="button"
+              class="primary-lite"
+              aria-disabled={copyPending}
+              aria-busy={copyPending}
+              onclick={() => { if (!copyPending) void onCopyChecksumResults(task); }}
+            >
               <Icon name="list" size={14} />{copyPending ? tr("common.copying") : tr("gui.checksum.copy_results")}
             </button>
           </div>
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (focusable scroll region) -->
-          <div
-            class="task-checksum-table"
-            role="region"
-            aria-label={tr("gui.task.checksum_results")}
-            tabindex="0"
-            onkeydown={scrollResultList}
-          >
-            <div><b>{tr("gui.checksum.result")}</b><b>{tr("gui.checksum.digest")}</b><b>{tr("common.status")}</b></div>
-            {#each checksumRows as item}
-              <div>
-                <span>{pathBaseName(checksumItemText(item, "path")) || checksumItemText(item, "path")}</span>
-                <code class="checksum-digest">{checksumItemText(item, task.spec.kind === "checksum" ? "digest" : "actual") || checksumItemText(item, "expected") || checksumItemText(item, "error")}</code>
-                <strong>{checksumItemStatus(item)}</strong>
-              </div>
-            {/each}
-          </div>
+          <table class="task-checksum-table" aria-label={tr("gui.task.checksum_results")}>
+            <thead>
+              <tr>
+                <th scope="col">{tr("common.path")}</th>
+                <th scope="col">{tr(task.spec.kind === "checksum" ? "gui.checksum.digest" : "gui.checksum.actual")}</th>
+                <th scope="col">{tr("common.status")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each checksumRows as item}
+                <tr>
+                  <td>{checksumItemText(item, "path")}</td>
+                  <td><code>{checksumItemText(item, task.spec.kind === "checksum" ? "digest" : "actual") || checksumItemText(item, "error") || tr("common.unavailable")}</code></td>
+                  <td class:failed={"ok" in item && !item.ok}>{checksumItemStatus(item)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
         </section>
       {/if}
       {@const detailRows = taskResultDetailRows(task)}
@@ -547,32 +554,25 @@
           aria-label={taskResultDetailTitle(task)}
         >
           <strong>{taskResultDetailTitle(task)}</strong>
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (focusable scroll region) -->
-          <div
-            class="task-result-detail-list"
-            role="region"
-            aria-label={taskResultDetailTitle(task)}
-            tabindex="0"
-            onkeydown={scrollResultList}
-          >
+          <dl class="task-result-detail-list">
             {#each detailRows as row}
               <div>
-                <span>{row.label}</span>
+                <dt>{row.label}</dt>
                 {#if row.scrollable}
                   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (focusable scroll region) -->
-                  <div
+                  <dd
                     class="scrollable"
                     role="region"
                     aria-label={row.label}
                     tabindex="0"
                     onkeydown={scrollResultList}
-                  ><code>{row.value}</code></div>
+                  ><code>{row.value}</code></dd>
                 {:else}
-                  <code>{row.value}</code>
+                  <dd><code>{row.value}</code></dd>
                 {/if}
               </div>
             {/each}
-          </div>
+          </dl>
         </section>
       {/if}
     {/if}

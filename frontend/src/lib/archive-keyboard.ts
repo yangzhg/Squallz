@@ -1,4 +1,6 @@
+import { tick } from "svelte";
 import type { BrowserEntry } from "./archive-browser";
+import type { UiMode } from "./uiMode.svelte";
 
 export function archiveTabStopPath(rows: readonly (BrowserEntry | null)[], focusedPath: string | null): string | null {
   const entries = rows.filter((entry) => entry?.source);
@@ -22,4 +24,50 @@ export function archiveKeyboardTarget(key: string, index: number, total: number,
     default: return null;
   }
   return Math.max(0, Math.min(total - 1, target));
+}
+
+export function handleArchiveNavigationKey(event: KeyboardEvent, move: () => void): boolean {
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    const row = event.currentTarget as HTMLElement;
+    const label = row.querySelector<HTMLElement>(".archive-entry-label");
+    if (label && label.scrollWidth > label.clientWidth) {
+      const offset = event.key === "ArrowLeft" ? -label.clientWidth : label.clientWidth;
+      const next = Math.max(0, Math.min(label.scrollWidth - label.clientWidth, label.scrollLeft + offset));
+      if (next !== label.scrollLeft) {
+        event.preventDefault();
+        label.scrollLeft = next;
+      }
+    }
+    return true;
+  }
+  if (!["ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) return false;
+  event.preventDefault();
+  move();
+  return true;
+}
+
+interface ArchiveRowFocus {
+  mode: UiMode;
+  rowHeight: number;
+  canFocus: () => boolean;
+  loadRowAt: (index: number) => Promise<{ path: string } | null>;
+  setViewport: (scrollTop: number, height: number) => void;
+}
+
+export async function focusVirtualArchiveRow(index: number, expectedPath: string | null, view: ArchiveRowFocus): Promise<void> {
+  await tick();
+  if (!view.canFocus()) return;
+  const list = document.querySelector<HTMLElement>(`[data-virtual-list="${view.mode}"]`);
+  if (!list) return;
+  const top = index * view.rowHeight;
+  const bottom = top + view.rowHeight;
+  const scrollTop = Math.max(0, Math.min(top, Math.max(list.scrollTop, bottom - list.clientHeight)));
+  if (scrollTop !== list.scrollTop) {
+    list.scrollTop = scrollTop;
+    view.setViewport(list.scrollTop, list.clientHeight);
+  }
+  const row = await view.loadRowAt(index);
+  if (!row || (expectedPath !== null && row.path !== expectedPath)) return;
+  await tick();
+  if (view.canFocus()) list.querySelector<HTMLElement>(`[data-row-index="${index}"]`)?.focus({ preventScroll: true });
 }

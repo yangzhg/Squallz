@@ -41,6 +41,9 @@ export interface EntryDto {
   encoding: string;
 }
 
+export type ArchiveSortKey = "name" | "size" | "modified";
+export type ArchiveSort = { key: ArchiveSortKey; direction: "asc" | "desc" };
+
 export interface Page {
   total: number;
   page: number;
@@ -720,15 +723,22 @@ export const ipc = {
     dirPrefix: string,
     filter?: string | null,
     pageSize?: number,
+    sort: ArchiveSort | null = null,
+    generation = 0,
   ) =>
-    invoke<Page>("list_entries", { id, page, pageSize, dirPrefix, filter }),
+    invoke<Page>("browse_entries", { id, page, pageSize, request: {
+      location: { kind: "directory", prefix: dirPrefix, filter }, sort, generation,
+    } }),
   searchEntries: (
     id: number,
     page: number,
     query: string,
     pageSize: number,
     generation: number,
-  ) => invoke<Page | null>("search_entries", { id, page, pageSize, query, generation }),
+    sort: ArchiveSort | null = null,
+  ) => invoke<Page | null>("browse_entries", { id, page, pageSize, request: {
+    location: { kind: "search", query }, sort, generation,
+  } }),
   cancelArchiveSearch: (id: number, generation: number) =>
     invoke<void>("cancel_archive_search", { id, generation }),
   getFormats: () => invoke<FormatDto[]>("get_formats"),
