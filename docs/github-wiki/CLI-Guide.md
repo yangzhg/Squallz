@@ -36,6 +36,10 @@
 | Runtime inventory | `sqz info --json` |
 | Strict diagnostics | `sqz doctor --strict` |
 
+Duplicate scans list one path per physical copy. Hard links to the same file share
+one entry. The reclaimable size assumes you keep one copy and counts only files
+whose listed path is their last hard link.
+
 `update --rename FROM --rename-to TO` and `update --move FROM --move-to TO`
 take the full source and destination archive paths with separate options. Each
 option takes one nonempty value. Repeat both options for multiple entries; for
@@ -206,6 +210,8 @@ sqz batch batch.json --json
 | 创建可编辑预设 | `sqz preset clone builtin.create.cross-platform-7z user.create.portable --label "Portable"` |
 | 能力清单 | `sqz info --json` |
 | 严格诊断 | `sqz doctor --strict` |
+
+重复文件扫描按独立的物理副本分组。若多个硬链接指向同一文件，结果只列出扫描范围内的一个代表路径。可回收字节数按至少保留一份内容估算，仍有其他硬链接的文件不计入可释放空间。
 
 `update --rename FROM --rename-to TO` 和 `update --move FROM --move-to TO`
 使用独立选项指定归档内的完整来源路径和目标路径。每个选项接收一个非空值。修改多个

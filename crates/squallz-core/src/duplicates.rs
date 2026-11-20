@@ -1,22 +1,27 @@
 //! Duplicate-file detection over local inputs.
 
-use std::collections::BTreeMap;
-use std::fs::File;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::api::{ControlToken, EntryPath, EntryType, FormatError, ProgressSink};
+use crate::filesystem_identity::{
+    file_identity_and_links, open_regular_file_no_follow, path_identity, PathIdentity,
+    RegularFileState,
+};
 use crate::{inputs, PathFilter};
 
 const HASH_BUFFER_SIZE: usize = 128 * 1024;
 const HASH_PROGRESS_STEP_BYTES: u64 = 1024 * 1024;
 
-/// One duplicate set. All paths have the same byte length and BLAKE3 digest.
+/// One representative per physical file with the same byte length and BLAKE3 digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateGroup {
     pub hash: String,
     pub size: u64,
     pub paths: Vec<PathBuf>,
+    /// Files whose representative was their only directory link during the scan.
+    pub single_link_files: usize,
 }
 
 impl DuplicateGroup {
@@ -25,8 +30,8 @@ impl DuplicateGroup {
     }
 
     pub fn reclaimable_bytes(&self) -> u64 {
-        self.size
-            .saturating_mul(self.paths.len().saturating_sub(1) as u64)
+        let removable = self.single_link_files.min(self.count().saturating_sub(1));
+        self.size.saturating_mul(removable as u64)
     }
 }
 
@@ -98,37 +103,63 @@ pub(crate) fn find_duplicates(
         bytes_scanned,
         ..DuplicateScanReport::default()
     };
-    for (size, paths) in &files_by_size {
-        ctl.checkpoint()?;
-        if paths.len() >= 2 {
-            report.candidate_files += paths.len();
-            report.hashed_bytes = report
-                .hashed_bytes
-                .saturating_add(size.saturating_mul(paths.len() as u64));
-        }
-    }
-    let mut groups_by_hash: BTreeMap<(u64, String), Vec<PathBuf>> = BTreeMap::new();
-    let mut done = 0;
-
+    let mut candidates = Vec::new();
     for (size, mut paths) in files_by_size {
         ctl.checkpoint()?;
         if paths.len() < 2 {
             continue;
         }
         paths.sort();
-        ctl.checkpoint()?;
+        let mut seen = HashSet::new();
+        let mut files = Vec::new();
         for path in paths {
-            let hash = hash_file(&path, progress, &mut done, report.hashed_bytes, ctl)?;
-            groups_by_hash.entry((size, hash)).or_default().push(path);
+            ctl.checkpoint()?;
+            let identity = path_identity(&path)?;
+            if seen.insert(identity) {
+                files.push((path, identity));
+            }
         }
+        if files.len() < 2 {
+            continue;
+        }
+        report.candidate_files += files.len();
+        report.hashed_bytes = report
+            .hashed_bytes
+            .saturating_add(size.saturating_mul(files.len() as u64));
+        candidates.push((size, files));
     }
 
-    for ((size, hash), mut paths) in groups_by_hash {
-        ctl.checkpoint()?;
-        if paths.len() >= 2 {
-            paths.sort();
+    let mut done = 0;
+    for (size, files) in candidates {
+        // Representatives arrive in path order, so each group's paths stay sorted.
+        let mut groups_by_hash = BTreeMap::new();
+        for (path, identity) in files {
             ctl.checkpoint()?;
-            report.groups.push(DuplicateGroup { hash, size, paths });
+            let (hash, links) = hash_file(
+                &path,
+                identity,
+                size,
+                progress,
+                &mut done,
+                report.hashed_bytes,
+                ctl,
+            )?;
+            let (paths, single_link_files) = groups_by_hash
+                .entry(hash)
+                .or_insert_with(|| (Vec::new(), 0));
+            paths.push(path);
+            *single_link_files += usize::from(links == 1);
+        }
+        for (hash, (paths, single_link_files)) in groups_by_hash {
+            ctl.checkpoint()?;
+            if paths.len() > 1 {
+                report.groups.push(DuplicateGroup {
+                    hash,
+                    size,
+                    paths,
+                    single_link_files,
+                });
+            }
         }
     }
     ctl.checkpoint()?;
@@ -143,23 +174,34 @@ pub(crate) fn find_duplicates(
 }
 
 fn hash_file(
-    path: &PathBuf,
+    path: &Path,
+    identity: PathIdentity,
+    size: u64,
     progress: &dyn ProgressSink,
     done: &mut u64,
     total: u64,
     ctl: &ControlToken,
-) -> Result<String, FormatError> {
+) -> Result<(String, u64), FormatError> {
     ctl.checkpoint()?;
-    let mut file = File::open(path)?;
+    let changed = || FormatError::Other("input changed during duplicate scan".into());
+    let mut file = open_regular_file_no_follow(path)?;
+    let metadata = file.metadata()?;
+    let state = RegularFileState::from_metadata(&metadata);
+    let (opened_identity, links) = file_identity_and_links(&file)?;
+    if !metadata.is_file() || opened_identity != identity || state.bytes() != size {
+        return Err(changed());
+    }
     let current = EntryPath::from_utf8(path.display().to_string());
     progress.on_progress(*done, total, &current);
     ctl.checkpoint()?;
-    let mut last_reported = *done;
+    let start = *done;
+    let mut last_reported = start;
     let mut hasher = blake3::Hasher::new();
     let mut buf = [0u8; HASH_BUFFER_SIZE];
+    let mut reader = (&mut file).take(size);
     loop {
         ctl.checkpoint()?;
-        let read = file.read(&mut buf)?;
+        let read = reader.read(&mut buf)?;
         ctl.checkpoint()?;
         if read == 0 {
             break;
@@ -176,5 +218,58 @@ fn hash_file(
         progress.on_progress(*done, total, &current);
     }
     ctl.checkpoint()?;
-    Ok(hasher.finalize().to_hex().to_string())
+    if done.saturating_sub(start) != size
+        || !state.matches(&file.metadata()?)
+        || path_identity(path)? != identity
+    {
+        return Err(changed());
+    }
+    Ok((hasher.finalize().to_hex().to_string(), links))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::NoProgress;
+
+    #[test]
+    fn duplicates_distinguish_hard_links_from_independent_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("scan");
+        std::fs::create_dir(&root).unwrap();
+        let first = root.join("a");
+        let copy = root.join("copy");
+        std::fs::write(&first, b"same").unwrap();
+        std::fs::hard_link(&first, root.join("alias")).unwrap();
+        let scan = || {
+            find_duplicates(
+                std::slice::from_ref(&root),
+                &[],
+                0,
+                &NoProgress,
+                &ControlToken::default(),
+            )
+            .unwrap()
+        };
+
+        let aliases_only = scan();
+        assert_eq!(aliases_only.files_scanned, 2);
+        assert_eq!(aliases_only.candidate_files, 0);
+        assert_eq!(aliases_only.hashed_bytes, 0);
+        assert!(aliases_only.groups.is_empty());
+
+        std::fs::write(&copy, b"same").unwrap();
+        let duplicates = scan();
+        assert_eq!(duplicates.files_scanned, 3);
+        assert_eq!(duplicates.candidate_files, 2);
+        assert_eq!(duplicates.hashed_bytes, 8);
+        assert_eq!(duplicates.duplicate_files(), 2);
+        assert_eq!(duplicates.groups[0].paths, [first, copy.clone()]);
+        assert_eq!(duplicates.reclaimable_bytes(), 4);
+
+        std::fs::hard_link(copy, dir.path().join("outside")).unwrap();
+        let linked_copies = scan();
+        assert_eq!(linked_copies.groups[0].count(), 2);
+        assert_eq!(linked_copies.reclaimable_bytes(), 0);
+    }
 }

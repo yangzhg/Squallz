@@ -241,19 +241,24 @@ pub(crate) fn path_identity(_path: &Path) -> io::Result<PathIdentity> {
     ))
 }
 
-#[cfg(unix)]
 pub(crate) fn file_identity(file: &File) -> io::Result<PathIdentity> {
+    file_identity_and_links(file).map(|(identity, _)| identity)
+}
+
+#[cfg(unix)]
+pub(crate) fn file_identity_and_links(file: &File) -> io::Result<(PathIdentity, u64)> {
     use std::os::unix::fs::MetadataExt;
 
     let metadata = file.metadata()?;
-    Ok(PathIdentity {
+    let identity = PathIdentity {
         filesystem: metadata.dev(),
         entry: metadata.ino(),
-    })
+    };
+    Ok((identity, metadata.nlink()))
 }
 
 #[cfg(windows)]
-pub(crate) fn file_identity(file: &File) -> io::Result<PathIdentity> {
+pub(crate) fn file_identity_and_links(file: &File) -> io::Result<(PathIdentity, u64)> {
     let information = winapi_util::file::information(file)?;
     let identity = PathIdentity {
         filesystem: information.volume_serial_number(),
@@ -265,7 +270,7 @@ pub(crate) fn file_identity(file: &File) -> io::Result<PathIdentity> {
             "the filesystem did not provide a stable file identity",
         ));
     }
-    Ok(identity)
+    Ok((identity, information.number_of_links()))
 }
 
 #[cfg(windows)]
@@ -311,7 +316,7 @@ fn file_change_time(file: &File) -> io::Result<i64> {
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn file_identity(_file: &File) -> io::Result<PathIdentity> {
+pub(crate) fn file_identity_and_links(_file: &File) -> io::Result<(PathIdentity, u64)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "stable file identity is unavailable on this platform",

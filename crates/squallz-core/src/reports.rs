@@ -221,6 +221,7 @@ mod tests {
                 hash: "abc".into(),
                 size: 4,
                 paths: vec!["a".into(), "b".into(), "c".into()],
+                single_link_files: 3,
             }],
         };
         let hash_buffer = report.groups[0].hash.as_ptr();
@@ -269,6 +270,7 @@ mod tests {
                 hash: "abc".into(),
                 size: 0,
                 paths: vec![path.clone()],
+                single_link_files: 1,
             }],
             ..DuplicateScanReport::default()
         };

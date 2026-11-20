@@ -305,6 +305,7 @@ mod tests {
                         hash: "ab".into(),
                         size: 64,
                         paths: vec![source.into(), source.into()],
+                        single_link_files: 2,
                     }],
                     ..Default::default()
                 },
