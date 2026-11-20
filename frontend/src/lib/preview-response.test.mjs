@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 
-import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
+import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions } from "../../tests/source.mjs";
 import { extractionFixture } from "../../tests/extraction.mjs";
 
@@ -57,6 +57,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
   try {
     const archive = await server.ssrLoadModule("/src/lib/archive.svelte.ts");
     const { ipc, isErrorDto } = await server.ssrLoadModule("/src/lib/ipc.ts");
+    const { tFallback: tr } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
     const closed = [];
     const cancelledPreviews = [];
     ipc.closeArchive = async (id) => { closed.push(id); };
@@ -132,7 +133,7 @@ async function withNestedOpen(run, { systemOpen = false } = {}) {
       selectRow: archive.selectRow, toggleSelect: archive.toggleSelect, selectedPaths: archive.selectedPaths,
       pathBaseName: (path) => path.split("/").at(-1),
       showNotice: (notice) => notices.push(notice), recordOperation: (operation) => operations.push(operation),
-      tr: englishTranslate,
+      tr,
     };
     Object.defineProperty(context, "currentArchive", { get: () => archive.archive() });
     extraction.install(context);
@@ -521,9 +522,10 @@ test("a late nested listing cannot replace a newer inner archive or clear its re
 
 test("system opening and encoding repair keep preparation and feedback within the current context", async () => {
   await withNestedOpen(async ({ app, archive, ipc, context, notices, closed }) => {
+    const commandName = "汇总$&{size} $'.command";
     const preview = {
-      preview_id: "prepared-command", outer_path: "/archives/outer.zip", entry_path: "fixture.command",
-      display_name: "fixture.command", size: 10, archive_like: false,
+      preview_id: "prepared-command", outer_path: "/archives/outer.zip", entry_path: commandName,
+      display_name: commandName, size: 10, archive_like: false,
     };
     const confirmations = [];
     const opened = [];
@@ -613,11 +615,12 @@ test("system opening and encoding repair keep preparation and feedback within th
       context.getDialogModule = async () => ({ confirm: async (...args) => { confirmations.push(args); return accepted; } });
       assert.equal(await app.openEntryPreview(), accepted);
       assert.equal(confirmations.length, 1);
-      assert.match(confirmations[0][0], /fixture.command/u);
+      assert.ok(confirmations[0][0].includes(preview.display_name));
       assert.deepEqual(opened, accepted ? [preview.preview_id] : []);
       assert.equal(context.entryPreviewFailure, accepted ? null : feedback);
       assert.equal(notices.length, 1);
       assert.match(notices[0], accepted ? /^Opened:/u : /was not opened/u);
+      assert.ok(notices[0].includes(preview.display_name));
     }
 
     for (const change of ["archive", "encoding"]) {
@@ -712,7 +715,8 @@ test("system opening and encoding repair keep preparation and feedback within th
     assert.equal(context.extraction.state.presetEncodingLabel, "newer same-source draft encoding");
     context.reopenWithEncoding = archive.reopenWithEncoding;
 
-    const preparedFile = { ...preview, entry_path: "notes.txt", display_name: "notes.txt" };
+    const textName = "汇总$&{size} $'.txt";
+    const preparedFile = { ...preview, entry_path: textName, display_name: textName };
     prepare(preparedFile);
     context.appNotice = "existing feedback";
     ipc.openPreviewSession = async () => { throw new Error("system open failed"); };
@@ -720,7 +724,7 @@ test("system opening and encoding repair keep preparation and feedback within th
     assert.equal(context.appNotice, null, "system opening clears older feedback before waiting");
     context.appNotice = "newer independent feedback";
     assert.equal(await opening, false);
-    assert.equal(context.entryPreviewFailure.message, "Could not open: notes.txt");
+    assert.equal(context.entryPreviewFailure.message, `Could not open: ${textName}`);
     assert.equal(context.entryPreview.preview_id, preview.preview_id, "system-open failure keeps the prepared file retryable");
     assert.equal(context.appNotice, "newer independent feedback", "a late system-open failure preserves other actions' feedback");
     assert.deepEqual(notices, [], "system-open failure is visible inline without a duplicate notice");
@@ -732,14 +736,14 @@ test("system opening and encoding repair keep preparation and feedback within th
     ipc.previewArchiveEntry = () => { preparationRequested.resolve(); return preparing.promise; };
     ipc.openPreviewSession = async () => { throw new Error("system open failed"); };
     context.appNotice = "existing feedback";
-    const automaticOpening = app.submitPreviewEntry("notes.txt", "file", 1);
+    const automaticOpening = app.submitPreviewEntry(textName, "file", 1);
     assert.equal(context.appNotice, null);
     await preparationRequested.promise;
     context.appNotice = "newer preparation feedback";
     preparing.resolve(preparedFile);
     await automaticOpening;
     assert.equal(context.appNotice, "newer preparation feedback", "automatic system opening preserves feedback received during preparation");
-    assert.equal(context.entryPreviewFailure.message, "Could not open: notes.txt");
+    assert.equal(context.entryPreviewFailure.message, `Could not open: ${textName}`);
     assert.equal(context.entryPreview.preview_id, preparedFile.preview_id);
     assert.deepEqual(notices, []);
 

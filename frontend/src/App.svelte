@@ -3164,10 +3164,7 @@
       recoverySession.leave();
       recoverySession.selectSource(path);
       setScreen("recovery");
-      showNotice(
-        tr("gui.recovery.open_failed_routed")
-          .replace("{name}", pathBaseName(path)),
-      );
+      showNotice(tr("gui.recovery.open_failed_routed", { name: pathBaseName(path) }));
       return true;
     }
     if (!archiveOpenError(path)) return false;
@@ -3203,19 +3200,15 @@
       return tError(error);
     }
     if (error?.key === "error.unsupported") {
-      return tr("gui.archive.open_unsupported")
-        .replace("{name}", pathBaseName(path));
+      return tr("gui.archive.open_unsupported", { name: pathBaseName(path) });
     }
     if (error?.key === "error.io") {
-      return tr("gui.archive.open_io")
-        .replace("{name}", pathBaseName(path));
+      return tr("gui.archive.open_io", { name: pathBaseName(path) });
     }
     if (error?.key === "error.resource_limit") {
-      return tr("gui.archive.open_resource_limit")
-        .replace("{name}", pathBaseName(path));
+      return tr("gui.archive.open_resource_limit", { name: pathBaseName(path) });
     }
-    return tr("gui.archive.open_failed")
-      .replace("{name}", pathBaseName(path));
+    return tr("gui.archive.open_failed", { name: pathBaseName(path) });
   }
 
   function isPar2Path(path: string): boolean {
@@ -3354,17 +3347,13 @@
   }
 
   function archiveReturnDetail(): string {
-    return tr(
-      "gui.archive.return_current_detail",
-    ).replace("{archive}", archiveTitle());
+    return tr("gui.archive.return_current_detail", { archive: archiveTitle() });
   }
 
   function returnToCurrentArchive() {
     const title = archiveTitle();
     setScreen("browse");
-    showNotice(
-      tr("gui.archive.returned_to_current").replace("{archive}", title),
-    );
+    showNotice(tr("gui.archive.returned_to_current", { archive: title }));
   }
 
   function archiveWarningText(): string {
@@ -3402,7 +3391,7 @@
   function entrySelectionLabel(entry: DisplayEntry): string {
     const name = entry.name || entry.source?.path || tr("gui.selection.entry");
     const key = isEntrySelected(entry) ? "gui.selection.deselect_entry" : "gui.selection.select_entry";
-    return tr(key).replace("{name}", name);
+    return tr(key, { name });
   }
 
   function entryPreviewForPath(entryPath: string): EntryPreviewDto | null {
@@ -4626,10 +4615,11 @@
     error: unknown,
     nested: boolean,
     fallbackKey: string,
+    params?: Record<string, string>,
   ): string {
     if (isErrorDto(error)) {
       if (error.key.startsWith("error.preview_")) {
-        return tr(error.key, tr(fallbackKey));
+        return tr(error.key, tr(fallbackKey), params);
       }
       if (error.key === "error.resource_limit") {
         return nested
@@ -4637,7 +4627,7 @@
           : tr("gui.preview.resource_limit");
       }
     }
-    return tr(fallbackKey);
+    return tr(fallbackKey, params);
   }
 
   function previewBusy(): boolean {
@@ -4669,10 +4659,9 @@
 
   function archiveLine(): string {
     if (!currentArchive) return openArchiveFirstLabel();
-    return tr("gui.archive.line")
-      .replace("{name}", currentArchive.name)
-      .replace("{count}", currentArchive.entry_count.toLocaleString())
-      .replace("{format}", archiveFormat());
+    return tr("gui.archive.line", {
+      name: currentArchive.name, count: currentArchive.entry_count.toLocaleString(), format: archiveFormat(),
+    });
   }
 
   function archiveInfoRows(): Array<[string, string]> {
@@ -4912,9 +4901,7 @@
       recordOperation({
         status: "queued",
         title: tr("gui.delete.queued"),
-        detail: tr("gui.delete.entries_from_archive")
-          .replace("{count}", paths.length.toLocaleString())
-          .replace("{archive}", archiveTitle()),
+        detail: tr("gui.delete.entries_from_archive", { count: paths.length.toLocaleString(), archive: archiveTitle() }),
       });
     }
   }
@@ -5224,7 +5211,7 @@
           openExtractWorkspace("all");
           focusExtractReview();
         }
-        showNotice(tr("gui.preview.opened_nested_archive").replace("{name}", info.name));
+        showNotice(tr("gui.preview.opened_nested_archive", { name: info.name }));
         recordOperation({
           status: "done",
           title: tr("gui.preview.nested_opened_operation_title"),
@@ -5267,10 +5254,7 @@
     try {
       await ipc.revealPreviewSession(preview.preview_id);
       if (!responseIsCurrent()) return;
-      showNotice(
-        tr("gui.preview.revealed_system")
-          .replace("{name}", preview.display_name),
-      );
+      showNotice(tr("gui.preview.revealed_system", { name: preview.display_name }));
     } catch (error) {
       if (!responseIsCurrent()) return;
       showNotice(previewFailureMessage(
@@ -5298,9 +5282,7 @@
         const { confirm } = await getDialogModule();
         if (!responseIsCurrent()) return false;
         confirmed = await confirm(
-          tr(
-            "gui.preview.risky_open_body",
-          ).replace("{name}", preview.display_name),
+          tr("gui.preview.risky_open_body", { name: preview.display_name }),
           {
             title: tr("gui.preview.risky_open_title"),
             kind: "warning",
@@ -5317,11 +5299,7 @@
       }
       if (!responseIsCurrent()) return false;
       if (!confirmed) {
-        showNotice(
-          tr(
-            "gui.preview.risky_open_cancelled",
-          ).replace("{name}", preview.display_name),
-        );
+        showNotice(tr("gui.preview.risky_open_cancelled", { name: preview.display_name }));
         return false;
       }
     }
@@ -5329,7 +5307,7 @@
       await ipc.openPreviewSession(preview.preview_id);
       if (!responseIsCurrent()) return false;
       previewSession.completeFileAction(action, currentArchive?.source ?? null);
-      showNotice(tr("gui.preview.opened_system").replace("{name}", preview.display_name));
+      showNotice(tr("gui.preview.opened_system", { name: preview.display_name }));
       return true;
     } catch (error) {
       if (!responseIsCurrent()) return false;
@@ -5337,7 +5315,8 @@
         error,
         false,
         "gui.preview.open_failed_ready",
-      ).replace("{name}", preview.display_name);
+        { name: preview.display_name },
+      );
       const entryType = entryTypeForPath(preview.entry_path);
       previewSession.failFileAction(action, currentArchive?.source ?? null, {
         entryPath: preview.entry_path,
@@ -6409,10 +6388,7 @@
       recoverySession.leave();
       recoverySession.selectSource(prompt.path);
       setScreen("recovery");
-      showNotice(
-        tr("gui.recovery.open_failed_routed")
-          .replace("{name}", pathBaseName(prompt.path)),
-      );
+      showNotice(tr("gui.recovery.open_failed_routed", { name: pathBaseName(prompt.path) }));
       return;
     }
     if (!archiveOpenError(prompt.path)) return;
@@ -7008,7 +6984,7 @@
     use:popupMenu={{ point: entryContext, anchor: entryContextReturnFocus, onClose: closeEntryContext }}
     transition:popupPresence
     role="menu"
-    aria-label={tr("gui.context.actions_for").replace("{name}", entryContext.name)}
+    aria-label={tr("gui.context.actions_for", { name: entryContext.name })}
     aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined}
     inert={blockingModalVisible() || modeSelectionBlocked}
   >

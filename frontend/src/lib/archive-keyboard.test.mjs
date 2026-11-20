@@ -129,6 +129,30 @@ function archiveBrowserView() {
   };
 }
 
+test("archive row selection, archive summaries and failure feedback preserve literal names", async () => {
+  const { loadLocale, tFallback: tr } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+  const name = "汇总$&{size} $'{count}{format}";
+  const entry = { name: `${name}.txt` };
+  const currentArchive = { name: `${name}.zip`, entry_count: 2 };
+  const app = harness(["entrySelectionLabel", "archiveLine", "archiveOpenFailureNotice"], {
+    tr, currentArchive, isEntrySelected: () => false, archiveFormat: () => "ZIP",
+    archiveOpenError: () => ({ key: "error.io" }), pathBaseName: (path) => path.split("/").at(-1),
+  });
+  try {
+    for (const [locale, select, deselect, count] of [["en-US", "Select", "Deselect", "2 entries"], ["zh-CN", "选择", "取消选择", "2 个条目"]]) {
+      await loadLocale(locale);
+      for (const [selected, label] of [[false, select], [true, deselect]]) {
+        app.context.isEntrySelected = () => selected;
+        assert.equal(app.entrySelectionLabel(entry), `${label} ${entry.name}`);
+      }
+      assert.equal(app.archiveLine(), `${currentArchive.name} · ${count} · ZIP`);
+      assert.ok(app.archiveOpenFailureNotice(`/archives/${currentArchive.name}`).includes(currentArchive.name));
+    }
+  } finally {
+    await loadLocale("en-US");
+  }
+});
+
 test("both archive browsers expose one row Tab stop with selection and open controls outside the Tab sequence", async () => {
   const { render } = await server.ssrLoadModule("svelte/server");
   const view = archiveBrowserView();
