@@ -199,7 +199,8 @@
   }
 
   function onTaskCardKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape" && !event.defaultPrevented) {
+    if (event.defaultPrevented || event.isComposing) return;
+    if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       if (presentation === "panel" || !isTaskActiveState(task.state)) void onDismiss(task);

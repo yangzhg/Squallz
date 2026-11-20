@@ -175,6 +175,7 @@
     normalizeDesktopFolder,
     sameDesktopPath,
   } from "./lib/desktop-path";
+  import { listenForFileDrops } from "./lib/file-drop";
   import {
     createSourcePaths,
     mergeCreateSources,
@@ -682,7 +683,6 @@
   });
   $effect(() => tools.syncContext());
   let dragActive = $state(false);
-  let lastDropKind = $state<"none" | "archives" | "create" | "recovery">("none");
   const convertRouteOwner: ConvertRouteOwner = {};
   let convertRouteHandle = $state<ConvertRouteHandle | null>(null);
   let convertRouteStatus = $derived<ConvertRouteStatus>(convertRouteHandle?.status() ?? {
@@ -1070,7 +1070,7 @@
     return availableAppActions[action];
   }
 
-  async function runAppAction(action: string, previewTarget?: PreviewActionTarget): Promise<boolean> {
+  async function runAppAction(action: string, previewTarget?: PreviewActionTarget, editorReturnFocus?: HTMLElement | null): Promise<boolean> {
     try {
       return await dispatchAppAction(action, previewTarget ? contextualAppActions(previewTarget) : availableAppActions, {
         open_archive: openArchiveFromDialog,
@@ -1079,8 +1079,8 @@
         extract_selection: () => openExtractWorkspace("selection"),
         add_files: submitAddToArchiveJob,
         new_folder: () => openArchiveEditor("new-folder"),
-        rename_entry: () => openArchiveEditor("rename"),
-        move_entries: () => openArchiveEditor("move"),
+        rename_entry: () => openArchiveEditor("rename", editorReturnFocus),
+        move_entries: () => openArchiveEditor("move", editorReturnFocus),
         delete_entries: submitDeleteSelectedJob,
         preview_entry: () => submitPreviewEntry(previewTarget?.path, previewTarget?.type),
         copy_entries: () => extraction.copyOut(),
@@ -1535,63 +1535,14 @@
       });
   });
 
-  onMount(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-
-    void import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow }) =>
-        getCurrentWindow().onDragDropEvent((event) => {
-          if (cancelled) return;
-          if (event.payload.type === "enter" || event.payload.type === "over") {
-            dragActive = !modeSelectionBlocked;
-          } else if (event.payload.type === "leave") {
-            dragActive = false;
-          } else if (event.payload.type === "drop") {
-            dragActive = false;
-            void handleDroppedPaths(event.payload.paths, "native");
-          }
-        }),
-      )
-      .then((dispose) => {
-        unlisten = dispose;
-      })
-      .catch(() => {
-        // Dev preview has no Tauri native file-drop event bus.
-      });
-
-    const onDragOver = (event: DragEvent) => {
-      event.preventDefault();
-      if (modeSelectionBlocked) {
-        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
-        dragActive = false;
-        return;
-      }
-      dragActive = true;
-    };
-    const onDragLeave = (event: DragEvent) => {
-      if (event.relatedTarget instanceof Node && document.body.contains(event.relatedTarget)) return;
-      dragActive = false;
-    };
-    const onDrop = (event: DragEvent) => {
-      event.preventDefault();
-      dragActive = false;
-      const paths = pathsFromDomDrop(event);
-      if (paths.length > 0) void handleDroppedPaths(paths, "dom");
-    };
-
-    window.addEventListener("dragover", onDragOver);
-    window.addEventListener("dragleave", onDragLeave);
-    window.addEventListener("drop", onDrop);
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-      window.removeEventListener("dragover", onDragOver);
-      window.removeEventListener("dragleave", onDragLeave);
-      window.removeEventListener("drop", onDrop);
-    };
-  });
+  onMount(() => listenForFileDrops({
+    platform: platformKind,
+    available: () => !modeSelectionBlocked && !taskWindowMode && !blockingModalVisible()
+      && !create.preflight.busy() && !create.preflight.state.pending && !create.preflight.state.picker,
+    hover: (active) => { dragActive = active; },
+    drop: (paths, source) => { void handleDroppedPaths(paths, source); },
+    missingPath: () => showNotice(tr("gui.drop.choose_files")),
+  }));
 
   onMount(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -1608,7 +1559,7 @@
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || event.isComposing) return;
       if (!nativeMenuConnection) {
         const action = appActionForShortcut(event, activePlatform);
         if (action && appActionEnabled(action)) {
@@ -2308,7 +2259,7 @@
       onCancelMoveConflict: () => archiveEdit.cancelReview(),
       onSubmitMoveReadyOnly: () => void archiveEdit.submitReviewedMove("ready-only"),
       onSubmitMoveKeepBoth: () => void archiveEdit.submitReviewedMove("keep-both"),
-      onBrowseScroll: onBrowseVirtualScroll,
+      mountBrowseViewport,
       onSelectEntry: (entry, event) => selectEntry(entry, event),
       onActivateEntry: (entry) => void activateEntry(entry),
       onOpenResultFolder: (entry) => void openSearchResultFolder(entry),
@@ -2408,14 +2359,15 @@
   }
 
   function archivePreviewView(): ArchivePreviewView {
+    const rows = nestedPreview?.items.slice(0, 5) ?? [];
     return {
       policyKind: activePreviewPolicyKind(),
       policyCode: activePreviewPolicyCode(),
       nested: nestedPreview
         ? {
             title: nestedPreviewTitle(),
-            subtitle: nestedPreviewSubtitle(),
-            rows: nestedPreviewRows(),
+            subtitle: nestedPreviewSubtitle(rows.length),
+            rows,
           }
         : null,
       title: entryPreviewTitle(),
@@ -2893,7 +2845,7 @@
   }
 
   function onArchiveFilterKeydown(event: KeyboardEvent): void {
-    if (event.key !== "Escape" || !filterText()) return;
+    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229 || !filterText()) return;
     event.preventDefault();
     event.stopPropagation();
     clearArchiveFilter();
@@ -3071,7 +3023,7 @@
         restore: () => {
           setScreen("convert");
           focusConvertReview();
-          showNotice(tr("gui.archive.open_loaded"));
+          showNotice(tr("gui.archive.opened_operation"));
           return true;
         },
       } : null);
@@ -3210,6 +3162,7 @@
   }
 
   function finishOpenedArchive(path: string, source: "dialog" | "open-file" | "password") {
+    browseScrollTop = 0;
     const review = pendingArchiveTaskReview;
     pendingArchiveTaskReview = null;
     rememberRecent(path);
@@ -3223,13 +3176,7 @@
     clearEntryPreviewState();
     if (review && sameFilePath(review.path, path) && review.restore()) return;
     setScreen("browse");
-    showNotice(
-      source === "password"
-        ? tr("gui.archive.unlocked")
-        : source === "open-file"
-          ? tr("gui.archive.open_file_loaded")
-          : tr("gui.archive.open_loaded"),
-    );
+    showNotice(tr(source === "password" ? "gui.archive.unlocked" : "gui.archive.opened_operation"));
     recordValidationRenderReady(`archive-open:${source}`);
   }
 
@@ -3340,10 +3287,25 @@
     return entries;
   }
 
-  function onBrowseVirtualScroll(event: Event) {
-    const target = event.currentTarget as HTMLElement;
-    browseScrollTop = target.scrollTop;
-    browseViewportHeight = target.clientHeight;
+  function mountBrowseViewport(list: HTMLElement) {
+    list.scrollTop = browseScrollTop;
+    const measure = () => {
+      browseScrollTop = list.scrollTop;
+      browseViewportHeight = list.clientHeight;
+    };
+    measure();
+    $effect(() => {
+      if (list.scrollTop !== browseScrollTop) list.scrollTop = browseScrollTop;
+    });
+    const observer = new ResizeObserver(measure);
+    observer.observe(list);
+    list.addEventListener("scroll", measure);
+    return {
+      destroy() {
+        observer.disconnect();
+        list.removeEventListener("scroll", measure);
+      },
+    };
   }
 
   function archiveTitle(): string {
@@ -3754,13 +3716,14 @@
   async function runEntryContextAction(action: "extract" | "delete" | "rename" | "move" | "preview" | "test") {
     const contextPath = entryContext?.path ?? null;
     const contextIsDir = entryContext?.isDir === true;
+    const editorReturnFocus = action === "rename" || action === "move" ? entryContextReturnFocus : undefined;
     closeEntryContext();
     const actions: Record<typeof action, AppAction> = {
       extract: "extract_selection", delete: "delete_entries", rename: "rename_entry",
       move: "move_entries", preview: "preview_entry", test: "test_archive",
     };
     await runAppAction(actions[action], action === "preview" && contextPath
-      ? { path: contextPath, type: contextIsDir ? "dir" : "file" } : undefined);
+      ? { path: contextPath, type: contextIsDir ? "dir" : "file" } : undefined, editorReturnFocus);
   }
 
   function onEntryKeydown(event: KeyboardEvent, entry: DisplayEntry) {
@@ -3912,51 +3875,12 @@
     });
   }
 
-  function dropStatusLabel(): string {
-    if (dragActive) return tr("gui.drop.active");
-    if (lastDropKind === "archives") {
-      return tr("gui.drop.archives_ready").replace("{count}", String(extraction.review.batch.state.items.length));
-    }
-    if (lastDropKind === "create") {
-      return tr("gui.drop.create_ready").replace("{count}", String(create.sources.length));
-    }
-    if (lastDropKind === "recovery") {
-      return tr("gui.drop.recovery_ready");
-    }
-    return "";
-  }
-
   function uniqueNonEmptyPaths(paths: string[]): string[] {
     return createSourcePaths(mergeCreateSources(
       [],
       paths.map((path) => ({ path, kind: "unknown" })),
       platformKind(),
     ));
-  }
-
-  function pathsFromDomDrop(event: DragEvent): string[] {
-    const transfer = event.dataTransfer;
-    if (!transfer) return [];
-    const uriList = transfer.getData("text/uri-list");
-    const textList = transfer.getData("text/plain");
-    const fromText = (uriList || textList)
-      .split(/\r?\n/)
-      .filter((line) => line.length > 0 && !line.startsWith("#"))
-      .map((line) => {
-        if (!line.startsWith("file://")) return line;
-        try {
-          return decodeURIComponent(new URL(line).pathname);
-        } catch {
-          return line.replace(/^file:\/\//, "");
-        }
-      });
-    const fromFiles = Array.from(transfer.files)
-      .map((file) => {
-        const maybePath = (file as File & { path?: string }).path;
-        return maybePath || file.name;
-      })
-      .filter(Boolean);
-    return uniqueNonEmptyPaths([...fromText, ...fromFiles]);
   }
 
   function recordValidationEvent(event: string, payload: Record<string, unknown>) {
@@ -4053,6 +3977,10 @@
       }
       return;
     }
+    if (taskWindowMode || blockingModalVisible()) {
+      showNotice(tr("gui.drop.return_to_workspace"));
+      return;
+    }
     if (create.preflight.state.picker) {
       showNotice(tr("gui.create.sources.finish_picker_before_drop"));
       return;
@@ -4067,7 +3995,6 @@
     }
     if (screen === "create") {
       const result = create.appendSources(dropped, "unknown");
-      lastDropKind = "create";
       recordValidationEvent("frontend.drop", {
         source,
         route: "create",
@@ -4088,7 +4015,6 @@
         archive_count: dropped.filter((path) => !isPar2Path(path) && archiveLikePath(path)).length,
         recovery_count: dropped.filter(isPar2Path).length,
       });
-      lastDropKind = "recovery";
       openRecoverySetFromPaths(dropped, "open-file");
       return;
     }
@@ -4102,7 +4028,6 @@
         archive_count: archivePaths.length,
         create_count: 0,
       });
-      lastDropKind = "archives";
       if (!extraction.review.replaceSources(archivePaths)) return;
       if (archivePaths.length === 1) {
         await openArchivePath(archivePaths[0], "open-file");
@@ -4112,7 +4037,6 @@
       return;
     }
 
-    lastDropKind = "create";
     const result = create.appendSources(dropped, "unknown");
     recordValidationEvent("frontend.drop", {
       source,
@@ -4557,20 +4481,15 @@
     return `${pathBaseName(nestedPreview.entry_path)} · ${nestedPreview.archive.format.toUpperCase()}`;
   }
 
-  function nestedPreviewSubtitle(): string {
+  function nestedPreviewSubtitle(shown: number): string {
     if (!currentArchive) return openArchiveFirstLabel();
     if (previewPhase === "nested") {
-      return tr("gui.preview.loading_target")
-        .replace("{name}", previewTargetName || tr("gui.preview.selected_entry"));
+      return tr("gui.preview.loading_target", { name: previewTargetName || tr("gui.preview.selected_entry") });
     }
     if (!nestedPreview) return tr("gui.preview.select_file");
-    return tr("gui.preview.nested_entries")
-      .replace("{count}", nestedPreview.archive.entry_count.toLocaleString())
-      .replace("{suffix}", nestedPreview.truncated ? tr("gui.preview.first_200_shown_suffix") : "");
-  }
-
-  function nestedPreviewRows(): EntryDto[] {
-    return nestedPreview?.items.slice(0, 5) ?? [];
+    const count = nestedPreview.archive.entry_count;
+    if (shown < count) return tr("gui.preview.nested_sample", { count: count.toLocaleString(), shown });
+    return count === 1 ? tr("gui.preview.one_entry") : tr("gui.archive.entry_count", { count: count.toLocaleString() });
   }
 
   function entryPreviewTitle(): string {
@@ -4584,8 +4503,7 @@
   function entryPreviewSubtitle(): string {
     if (!currentArchive) return openArchiveFirstLabel();
     if (previewPhase !== "idle") {
-      return tr("gui.preview.loading_target")
-        .replace("{name}", previewTargetName || tr("gui.preview.selected_entry"));
+      return tr("gui.preview.loading_target", { name: previewTargetName || tr("gui.preview.selected_entry") });
     }
     if (entryPreviewFailure) {
       return entryPreviewFailure.message;
@@ -4987,7 +4905,7 @@
     }
   }
 
-  function openArchiveEditor(kind: ArchiveEditKind) {
+  function openArchiveEditor(kind: ArchiveEditKind, returnFocus?: HTMLElement | null) {
     const reason = kind === "rename" ? renameSelectedDisabledReason()
       : kind === "move" ? moveSelectedDisabledReason() : archiveMutationDisabledReason();
     if (!currentArchive || reason) {
@@ -4997,7 +4915,7 @@
     const owner = archiveEdit.open(kind);
     if (!owner) return;
     archiveEditReturnFocus = {
-      owner, target: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      owner, target: returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null),
     };
     setScreen("browse");
   }
@@ -5089,6 +5007,7 @@
     const id = currentArchive.id;
     const navigation = taskReviewRequestGeneration;
     const origin = document.activeElement;
+    const focusContents = resultFolderLabel !== undefined || origin?.closest("[data-virtual-list]");
     const viewMode = mode;
     clearEntryPreviewState();
     const listing = enterDirPath(directory);
@@ -5105,7 +5024,7 @@
       path: archiveDirs.join("/"),
     });
     showNotice(tr("gui.preview.folder_opened").replace("{name}", () => name));
-    if (resultFolderLabel === undefined) return;
+    if (!focusContents) return;
     const canFocus = () => isCurrent() && screen === "browse" && !blockingModalVisible() && !taskCenterOpen
       && !modeSelectionBlocked && (document.activeElement === origin || document.activeElement === document.body);
     if (!canFocus()) return;
@@ -7004,6 +6923,7 @@
 {#if macosSfxPublisherTask && LoadedMacosSfxPublisher}
   <LoadedMacosSfxPublisher
     task={macosSfxPublisherTask}
+    notice={appNotice}
     returnFocus={macosSfxReturnFocus}
     rootClass={`sfx-publish-overlay design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
@@ -7040,19 +6960,18 @@
   {/if}
 {/if}
 
-{#if (dragActive || lastDropKind !== "none") && !modeSelectionBlocked}
+{#if dragActive && !modeSelectionBlocked && !taskWindowMode && !blockingModalVisible()}
   <div
-    class={`drop-status mode-${mode} themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
+    class={`drop-status themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
-    class:active={dragActive}
     role="status"
-    aria-hidden={blockingModalVisible() ? "true" : undefined}
-  >{dropStatusLabel()}</div>
+  >{tr(screen === "create" ? "gui.drop.add_sources" : "gui.drop.active")}</div>
 {/if}
 
 {#if !taskWindowMode && archiveEdit.kind && archiveEditorVisible() && !taskDialogVisible() && !macosSfxPublisherTask}
   <ArchiveEntryEditor
     {...archiveEditorFields(archiveEdit.kind)}
+    notice={appNotice}
     rootClass={`archive-editor-overlay design-root platform-${activePlatform} palette-${settingsSession.colors.palette} theme-${activeTheme} density-${activeDensityChoice}`}
     rootVariables={customPaletteVariables()}
     cancelLabel={tr("common.cancel")}

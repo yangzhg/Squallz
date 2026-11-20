@@ -99,7 +99,7 @@
     onSearchInput,
     onSearchKeydown,
     onClearSearch,
-    onBrowseScroll,
+    mountBrowseViewport,
     onSort,
     onSelectEntry,
     onActivateEntry,
@@ -354,7 +354,7 @@
       class="virtual-scroll modern-virtual-scroll"
       role="rowgroup"
       data-virtual-list="modern"
-      onscroll={onBrowseScroll}
+      use:mountBrowseViewport
     >
       <div class="virtual-pad" use:cssVariables={virtualPadVariables(view.paddingTop)}></div>
       {#each view.rows as entry, index (view.startIndex + index)}
@@ -408,16 +408,12 @@
                   <Icon name="lock" size={14} />
                 {:else if entry.source?.entry_type === "symlink" || entry.source?.entry_type === "hardlink"}
                   <Icon name="link" size={14} />
+                {:else if entry.type === "folder"}
+                  <Icon name="folder" size={14} />
+                {:else if entry.type === "warning"}
+                  <Icon name="alert-triangle" size={14} />
                 {:else}
-                  {entry.type === "folder"
-                    ? "DIR"
-                    : entry.type === "pdf"
-                      ? "PDF"
-                      : entry.type === "sheet"
-                        ? "XLS"
-                        : entry.type === "warning"
-                          ? "TXT"
-                          : "FILE"}
+                  <Icon name="file" size={14} />
                 {/if}
               </span>
               <ArchiveEntryLabel {entry} {tr} {onOpenResultFolder}

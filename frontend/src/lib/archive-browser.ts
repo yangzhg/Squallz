@@ -144,7 +144,7 @@ export interface ArchiveBrowserActions {
   onCancelMoveConflict: () => void;
   onSubmitMoveReadyOnly: () => void;
   onSubmitMoveKeepBoth: () => void;
-  onBrowseScroll: (event: Event) => void;
+  mountBrowseViewport: (list: HTMLElement) => { destroy(): void };
   onSelectEntry: (entry: BrowserEntry, event: MouseEvent | KeyboardEvent) => void;
   onActivateEntry: (entry: BrowserEntry) => void;
   onOpenResultFolder: (entry: BrowserEntry) => void;

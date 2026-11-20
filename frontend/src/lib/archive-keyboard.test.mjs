@@ -211,6 +211,39 @@ test("opening a search result folder leaves feedback and focus with the latest v
   assert.equal(focused, 1);
 });
 
+test("opening a folder from a row keeps navigation inside its contents without taking later focus", async () => {
+  for (const scenario of ["row", "empty", "outside", "focus moved"]) {
+    const origin = { closest: () => scenario === "outside" ? null : {} };
+    const document = { body: {}, activeElement: origin };
+    const listing = deferred();
+    const focus = [];
+    const app = harness(["openArchiveDirectoryEntry"], {
+      document, archiveDirs: ["folder"], pathBaseName: () => "folder", clearEntryPreviewState() {},
+      enterDirPath: () => listing.promise, archiveBrowseError: () => null, browseScrollTop: 0,
+      recordValidationEvent() {}, showNotice() {}, tr: englishTranslate,
+      totalRows: () => scenario === "empty" ? 0 : 2, focusArchiveRow: (index) => focus.push(index),
+      archiveSearchInput: { focus: () => focus.push("search") },
+    });
+    const open = app.openArchiveDirectoryEntry("folder/");
+    document.activeElement = scenario === "focus moved" ? {} : document.body;
+    listing.resolve();
+    await open;
+    assert.deepEqual(focus, scenario === "row" ? [0] : scenario === "empty" ? ["search"] : [], scenario);
+  }
+});
+
+test("Escape clears archive search only after input method editing finishes", () => {
+  const calls = [];
+  const app = harness(["onArchiveFilterKeydown"], { filterText: () => "报告", clearArchiveFilter: () => calls.push("clear") });
+  const escape = { key: "Escape", preventDefault: () => calls.push("prevent"), stopPropagation: () => calls.push("stop") };
+  for (const state of [{ isComposing: true }, { keyCode: 229 }, { defaultPrevented: true }]) {
+    app.onArchiveFilterKeydown({ ...escape, ...state });
+  }
+  assert.deepEqual(calls, []);
+  app.onArchiveFilterKeydown(escape);
+  assert.deepEqual(calls, ["prevent", "stop", "clear"]);
+});
+
 test("loaded keyboard targets preserve range intent and ignore stale requests or changed selection", async () => {
   for (const change of ["none", "descendant", "selection", "focus", "archive", "sort", "navigation", "mode", "modal", "tasks", "newer", "missing"]) {
     const waiting = deferred();

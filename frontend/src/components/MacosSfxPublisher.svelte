@@ -25,6 +25,7 @@
 
   let {
     task,
+    notice = null,
     rootClass,
     rootVariables,
     returnFocus = null,
@@ -37,6 +38,7 @@
     onClose,
   }: {
     task: TaskDialogModel;
+    notice?: string | null;
     rootClass: string;
     rootVariables: CssVariableMap;
     returnFocus?: HTMLElement | null;
@@ -129,6 +131,7 @@
 
 {#if source && output}
   <SfxPublishDialog
+    {notice}
     {rootClass}
     {rootVariables}
     {returnFocus}

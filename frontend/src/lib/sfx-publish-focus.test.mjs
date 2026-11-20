@@ -44,7 +44,12 @@ test("SFX Escape always stops at the dialog and only cancels while idle", () => 
     run.context.submitting = submitting;
     let prevented = false;
     let stopped = false;
-    run.api.onKeydown({ key: "Escape", preventDefault: () => { prevented = true; }, stopPropagation: () => { stopped = true; } });
+    const escape = { key: "Escape", preventDefault: () => { prevented = true; }, stopPropagation: () => { stopped = true; } };
+    run.api.onKeydown({ ...escape, isComposing: true });
+    assert.equal(prevented, false);
+    assert.equal(stopped, false);
+    assert.equal(run.context.cancels, 0);
+    run.api.onKeydown(escape);
     assert.equal(prevented, true);
     assert.equal(stopped, true);
     assert.equal(run.context.cancels, submitting ? 0 : 1);

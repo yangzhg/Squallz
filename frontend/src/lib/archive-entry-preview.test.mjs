@@ -9,6 +9,7 @@ test.after(() => server.close());
 const { render } = await server.ssrLoadModule("svelte/server");
 const { default: Preview } = await server.ssrLoadModule("/src/components/ArchiveEntryPreview.svelte");
 const { default: Icon } = await server.ssrLoadModule("/src/components/Icon.svelte");
+const { tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
 const source = readSvelteScript(new URL("../App.svelte", import.meta.url), "App.ts");
 
 function clean(html) { return html.replace(/<!--[^]*?-->/g, "").replace(/\s+/g, " ").trim(); }
@@ -93,14 +94,37 @@ for (const classic of [true, false]) {
       assert.doesNotMatch(html, /nested-preview-list|role="img"/);
     } else {
       assert.match(html, /nested-preview-list/);
-      assert.match(html, /<span>DIR<\/span>/);
-      assert.match(html, /<span>FILE<\/span>/);
+      assert.match(html, /role="img" aria-label="Folder" title="Folder"/);
+      assert.match(html, /role="img" aria-label="File" title="File"/);
       assert.match(html, /1\.0 KB/);
       assert.match(html, /role="img" aria-label="Symbolic link · Encrypted" title="Symbolic link · Encrypted"/);
       assert.match(html, /role="img" aria-label="Hard link" title="Hard link"/);
     }
   });
 }
+
+test("nested preview describes the actual sample for both small and truncated archives", () => {
+  const helpers = selectFunctions(source, ["archivePreviewView", "nestedPreviewSubtitle"]);
+  const context = vm.createContext({
+    currentArchive: {}, previewPhase: "idle", nestedPreview: null, entryPreview: null, entryPreviewFailure: null,
+    activePreviewPolicyKind() {}, activePreviewPolicyCode() {}, nestedPreviewTitle() {},
+    entryPreviewTitle() {}, entryPreviewSubtitle() {}, previewBusy() {}, appActionEnabled() {},
+    previewActionLabel() {}, previewActionIcon() {}, previewSelectedDisabledReason() {}, tr: tFallback,
+  });
+  const view = vm.runInContext(compileTestScript(helpers.map(fn => fn.getText(source)).join("\n")) + "\narchivePreviewView", context);
+  for (const [total, subtitle] of [
+    [0, "0 entries"], [1, "1 entry"], [5, "5 entries"],
+    [8, "8 entries · previewing the first 5"], [201, "201 entries · previewing the first 5"],
+  ]) {
+    context.nestedPreview = {
+      archive: { entry_count: total }, truncated: total > 200,
+      items: Array.from({ length: Math.min(total, 200) }, (_, index) => ({ display: `file-${index}` })),
+    };
+    const nested = view().nested;
+    assert.equal(nested.rows.length, Math.min(total, 5));
+    assert.equal(nested.subtitle, subtitle);
+  }
+});
 
 test("shared preview actions preserve close focus, queue routing, and successful-open cleanup", async () => {
   const [declaration] = selectFunctions(source, ["archivePreviewActions"]);

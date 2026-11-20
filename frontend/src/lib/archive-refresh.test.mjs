@@ -401,7 +401,7 @@ test("completed updates from one snapshot reopen the current archive only once",
       assert.equal(run.context.archiveOpenStatus, "idle");
       assert.equal(archive.archive().id, action === "same-path open" ? 3 : 2);
       assert.deepEqual(run.notices, action === "same-path open"
-        ? ["Open-file archive loaded"]
+        ? ["Opened archive"]
         : ["Opening file picker..."]);
       run.run();
       assert.equal(run.pending.length, 1, "the merged updates are not replayed after the newer action");
@@ -888,7 +888,7 @@ test("navigation to a missing folder displays a real parent instead of a phantom
 
 test("virtual rows keep cold and mixed page slots and clamp after the list shrinks", async (t) => {
   const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
-  const names = ["browseVirtualWindow", "browseEntries", "archiveBrowserSurface", "onBrowseVirtualScroll"];
+  const names = ["browseVirtualWindow", "browseEntries", "archiveBrowserSurface", "mountBrowseViewport"];
   const helpers = selectFunctions(source, names);
   const runtime = compileTestScript(helpers.map((node) => node.getText(source)).join("\n"), { target: ts.ScriptTarget.ES2022 });
   await withArchive(async ({ server, archive, ipc, requests }) => {
@@ -925,8 +925,20 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     const app = vm.runInNewContext(`${runtime}\n({browseVirtualWindow, archiveBrowserSurface})`, context);
     const classic = () => app.archiveBrowserSurface(42).view;
     const modern = () => app.archiveBrowserSurface(42).view;
-    const onScroll = app.archiveBrowserSurface(42).onBrowseScroll;
-    const scrollTo = (top) => onScroll({ currentTarget: { scrollTop: top, clientHeight: 420 } });
+    let resize;
+    context.ResizeObserver = class {
+      constructor(callback) { resize = callback; }
+      observe() {}
+      disconnect() { resize = null; }
+    };
+    context.$effect = (run) => run();
+    const list = Object.assign(new EventTarget(), { scrollTop: 0, clientHeight: 420 });
+    const mount = app.archiveBrowserSurface(42).mountBrowseViewport;
+    let viewport = mount(list);
+    const scrollTo = (top) => {
+      list.scrollTop = top;
+      list.dispatchEvent(new Event("scroll"));
+    };
     function checkSlots(surface, height, pending) {
       const window = app.browseVirtualWindow(height);
       const view = surface();
@@ -943,6 +955,22 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
       });
       return view;
     }
+    await t.test("the remounted list restores its saved position and measures resizing without a scroll", () => {
+      scrollTo(180 * 42);
+      viewport.destroy();
+      assert.equal(resize, null);
+      scrollTo(0);
+      list.clientHeight = 1008;
+      viewport = mount(list);
+      assert.equal(list.scrollTop, 180 * 42);
+      assert.equal(app.browseVirtualWindow(42).end - app.browseVirtualWindow(42).start, 24 + 24);
+      list.clientHeight = 1680;
+      resize();
+      assert.equal(app.browseVirtualWindow(42).end - app.browseVirtualWindow(42).start, 40 + 24);
+      assert.equal(list.scrollTop, 180 * 42);
+      list.clientHeight = 420;
+      resize();
+    });
     for (const [surface, height] of [[classic, 42], [modern, 42]]) {
       scrollTo(500 * height);
       const mixed = checkSlots(surface, height, true);
@@ -975,8 +1003,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     assert.ok(checkSlots(modern, 42, false).rows.every(Boolean));
     await t.test("sorting from the last page resets the scroll container before rendering the first rows", () => {
       for (const mode of ["modern", "classic"]) {
-        const list = { scrollTop: 9_990 * 42, clientHeight: 420 };
-        onScroll({ currentTarget: list });
+        scrollTo(9_990 * 42);
         context.mode = mode;
         context.document = { querySelector(selector) {
           assert.equal(selector, `[data-virtual-list="${mode}"]`);
@@ -1000,6 +1027,7 @@ test("virtual rows keep cold and mixed page slots and clamp after the list shrin
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(archive.totalRows(), 25);
     assert.equal(archive.archiveBrowseError(), null);
+    viewport.destroy();
   });
 });
 

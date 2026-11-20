@@ -70,6 +70,16 @@ test("App ignores a key already consumed by the focused overlay", () => {
   assert.equal(run.restored.length, 0);
 });
 
+test("app shortcuts and workspace Escape leave an active text composition to the input method", () => {
+  const run = menuHarness();
+  const event = keyboardEvent();
+  event.isComposing = true;
+  run.listeners.keydown(event);
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(run.context.shortcutCalls, 0);
+  assert.equal(run.context.workflowCalls, 0);
+});
+
 test("closing quick actions from the opener restores focus when a pointer left it inside the menu", () => {
   const run = menuHarness();
   vm.runInContext("toggleQuickActions()", run.context);
@@ -225,6 +235,11 @@ test("task Escape consumes the event without cancelling active work, and dismiss
       });
       const onKeydown = vm.runInContext(compileTestScript(activeState.getText(model) + "\n" + handler.getText(source))
         + "\nonTaskCardKeydown", context);
+      const composing = keyboardEvent();
+      composing.isComposing = true;
+      onKeydown(composing);
+      assert.equal(composing.defaultPrevented, false);
+      assert.equal(dismissed, 0);
       const event = keyboardEvent();
       onKeydown(event);
       assert.equal(event.defaultPrevented, true);

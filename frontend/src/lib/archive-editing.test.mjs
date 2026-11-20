@@ -4,7 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import { englishTranslate, createTestServer } from "../../tests/runtime.mjs";
-import { compileTestScript, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
+import { compileTestScript, evaluateFunctions, readSvelteScriptAsync, selectFunctions } from "../../tests/source.mjs";
 
 async function loadEditing(overrides = {}) {
   const server = await createTestServer();
@@ -1061,6 +1061,86 @@ test("archive editor feedback retains backend errors and explains blocked submis
     assert.equal(editing.submitted.length, 0);
     assert.equal(editing.closed.length, 0);
     assert.equal(editing.toasts.length, 0);
+  }
+});
+
+test("closing an editor opened from a row menu returns to that row, while toolbar edits return to the button", async () => {
+  const document = { body: {}, activeElement: null, documentElement: {}, querySelectorAll: () => [] };
+  class Element {
+    isConnected = true;
+    focus() { document.activeElement = this; }
+    getBoundingClientRect() { return { left: 1, bottom: 2 }; }
+    closest() { return null; }
+    matches() { return false; }
+  }
+  const row = new Element(), toolbar = new Element(), search = new Element();
+  const editing = await loadEditing({ document, HTMLElement: Element, archiveSearchInput: search });
+  const source = await readSvelteScriptAsync(new URL("../App.svelte", import.meta.url), "App.ts");
+  const state = {
+    document, HTMLElement: Element, entryContext: null, entryContextReturnFocus: null,
+    showEntryContextAt: () => { state.entryContext = { path: "docs/a.txt" }; },
+    closeEntryContext: () => { state.entryContext = null; },
+    handleArchiveNavigationKey: () => false, archiveSelectionBusyReason: () => "",
+    openArchiveEditor: editing.openArchiveEditor, availableAppActions: { rename_entry: true, move_entries: true },
+    dispatchAppAction: (action, enabled, handlers) => enabled[action] && handlers[action](),
+    openArchiveFromDialog: assert.fail, submitAddToArchiveJob: assert.fail, submitDeleteSelectedJob: assert.fail,
+    submitTestJob: assert.fail, goArchiveUp: assert.fail, pushToast: assert.fail, t: (key) => key,
+  };
+  const app = evaluateFunctions(source, ["openEntryContext", "onEntryKeydown", "runEntryContextAction", "runAppAction"], state);
+  for (const kind of ["rename", "move"]) {
+    for (const origin of ["contextmenu", "Shift+F10", "toolbar"]) {
+      if (origin === "toolbar") {
+        toolbar.focus();
+        await app.runAppAction(kind === "rename" ? "rename_entry" : "move_entries");
+      } else {
+        const event = { currentTarget: row, target: row, preventDefault() {} };
+        if (origin === "contextmenu") app.openEntryContext(event, {});
+        else app.onEntryKeydown({ ...event, shiftKey: true, key: "F10" }, {});
+        const item = new Element();
+        item.focus();
+        await app.runEntryContextAction(kind);
+        item.isConnected = false;
+      }
+      assert.equal(editing.edit.kind, kind);
+      editing.edit.close();
+      document.activeElement = document.body;
+      await new Promise(setImmediate);
+      assert.equal(document.activeElement, origin === "toolbar" ? toolbar : row, `${origin} ${kind}`);
+    }
+  }
+});
+
+test("the archive editor holds focus through a pending operation and respects later keyboard navigation", async () => {
+  const source = await readSvelteScriptAsync(new URL("../components/ArchiveEntryEditor.svelte", import.meta.url), "ArchiveEntryEditor.ts");
+  for (const action of ["submit", "retry"]) {
+    for (const result of ["input", "retry", "cancel", "closed"]) {
+      if (result === "retry" && action !== "retry") continue;
+      const pending = deferred();
+      const document = { activeElement: null };
+      class Element {
+        isConnected = true;
+        focus() { document.activeElement = this; }
+      }
+      class Button extends Element {}
+      const input = new Element(), panel = new Element(), trigger = new Button(), cancel = new Button();
+      panel.contains = (element) => [input, panel, trigger, cancel].includes(element);
+      trigger.focus();
+      const state = {
+        input, panel, document, HTMLButtonElement: Button, disabled: false, submitting: false,
+        onRetry: () => pending.promise, onSubmit: () => pending.promise, tick: async () => {},
+        onClose: () => assert.fail("composition Escape must leave the editor open"),
+      };
+      const api = evaluateFunctions(source, ["submit", "retry", "onKeydown"], state);
+      api.onKeydown({ key: "Escape", isComposing: true });
+      const done = api[action]({ preventDefault() {} });
+      assert.equal(document.activeElement, panel);
+      trigger.isConnected = result === "retry";
+      if (result === "cancel" || result === "closed") cancel.focus();
+      if (result === "closed") input.isConnected = false;
+      pending.resolve();
+      await done;
+      assert.equal(document.activeElement, result === "retry" ? trigger : result === "input" ? input : cancel);
+    }
   }
 });
 

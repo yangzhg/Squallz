@@ -30,6 +30,7 @@
     initialIdentity = "",
     initialProfile = "",
     returnFocus = null,
+    notice = null,
     onSubmit,
     onCancel,
   }: {
@@ -40,6 +41,7 @@
     initialIdentity?: string;
     initialProfile?: string;
     returnFocus?: HTMLElement | null;
+    notice?: string | null;
     onSubmit: (request: SfxPublishRequest) => Promise<string | null>;
     onCancel: () => void;
   } = $props();
@@ -119,6 +121,7 @@
   }
 
   function onKeydown(event: KeyboardEvent): void {
+    if (event.defaultPrevented || event.isComposing) return;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -374,6 +377,7 @@
     </div>
 
     <footer class="sfx-publish-actions">
+      {#if notice}<div class="surface-notice" role="status">{notice}</div>{/if}
       <button type="button" disabled={submitting} onclick={onCancel}>
         {tr("common.cancel")}
       </button>

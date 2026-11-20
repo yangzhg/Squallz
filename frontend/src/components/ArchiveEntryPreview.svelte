@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import Icon from "./Icon.svelte";
   import { formatBytes } from "../lib/format";
   import type { ArchivePreviewActions, ArchivePreviewView } from "../lib/archive-browser";
@@ -9,8 +10,24 @@
     tr: (key: string, fallback?: string) => string;
     classic?: boolean;
   } = $props();
-  let active = $derived(Boolean(view.nested || view.busy || view.failed || view.entry));
+  let phase = $derived(view.nested ? "nested" : view.busy ? "loading" : view.failed ? "failed" : view.entry ? "ready" : "idle");
+  let active = $derived(phase !== "idle");
   let iconSize = $derived(classic ? 13 : 14);
+  let closeButton = $state<HTMLButtonElement>();
+  let actionBar = $state<HTMLDivElement>();
+  const entryIcons = { dir: "folder", file: "file", symlink: "link", hardlink: "link", other: "file" };
+
+  $effect.pre(() => {
+    if (phase === "idle") return;
+    const previous = document.activeElement;
+    if (!previous || !actionBar?.contains(previous)) return;
+    void tick().then(() => {
+      if (!previous.isConnected && document.activeElement === document.body
+        && closeButton?.isConnected && !closeButton.closest("[inert]")) {
+        closeButton.focus({ preventScroll: true });
+      }
+    });
+  });
 </script>
 
 <div
@@ -29,6 +46,7 @@
     {/if}
     {#if active}
       <button
+        bind:this={closeButton}
         type="button"
         class="preview-panel-close"
         aria-label={tr("gui.preview.close")}
@@ -57,15 +75,12 @@
       </div>
       <div class="nested-preview-list">
         {#each view.nested.rows as item}
+          {@const type = item.entry_type === "dir" ? "folder" : item.entry_type}
+          {@const label = tr(`gui.attr.${type}`) + (item.encrypted ? ` · ${tr("gui.attr.encrypted")}` : "")}
           <div>
-            {#if item.entry_type === "symlink" || item.entry_type === "hardlink"}
-              {@const label = (item.entry_type === "symlink" ? tr("gui.attr.symlink") : tr("gui.attr.hardlink")) + (item.encrypted ? ` · ${tr("gui.attr.encrypted")}` : "")}
-              <span role="img" aria-label={label} title={label}>
-                <Icon name={item.encrypted ? "lock" : "link"} size={14} />
-              </span>
-            {:else}
-              <span>{item.entry_type === "dir" ? "DIR" : "FILE"}</span>
-            {/if}
+            <span role="img" aria-label={label} title={label}>
+              <Icon name={item.encrypted ? "lock" : entryIcons[item.entry_type]} size={14} />
+            </span>
             <strong>{item.display}</strong>
             <small>{formatBytes(item.size)}</small>
           </div>
@@ -85,7 +100,7 @@
     {/if}
   </div>
   {#if view.nested || !view.busy}
-    <div class="entry-preview-actions" class:inline-actions={!classic}>
+    <div bind:this={actionBar} class="entry-preview-actions" class:inline-actions={!classic}>
       {#if view.nested}
         <button onclick={actions.onOpenNestedPreview}>
           <Icon name="folder-open" size={iconSize} />{tr("gui.action.open_nested")}

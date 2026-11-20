@@ -231,6 +231,20 @@ test("anchored and pointer menus fade without moving their measured bounds", () 
   }
 });
 
+test("archive previews keep their text visible throughout the opening animation", () => {
+  const tree = element("aside", ["classic-tree"]);
+  const panel = element("div", ["entry-preview-panel", "preview-sheet-active"], tree);
+  const body = element("div", ["entry-preview-body"], panel);
+  const sample = element("div", ["nested-preview-list"], body);
+  for (const target of [body, sample, element("em", [], body), element("div", ["entry-preview-summary"], body)]) {
+    assert.equal(motionStyle(target, "no-preference").animation, undefined);
+  }
+  const animation = motionStyle(panel, "no-preference").animation.split(" ")[0];
+  const frames = stylesheet.children.find((node) => node.type === "Atrule" && node.name === "keyframes" && node.prelude === animation);
+  assert.deepEqual(frames.block.children.flatMap((frame) => frame.block.children.map((declaration) => declaration.property)), ["border-color"]);
+  assert.equal(motionStyle(panel, "reduce").animation, undefined);
+});
+
 test("disclosure and review content fade while controls keep their native focus and geometry", () => {
   for (const variant of ["modern-create", "classic-create"]) {
     const page = element("div", [variant]);

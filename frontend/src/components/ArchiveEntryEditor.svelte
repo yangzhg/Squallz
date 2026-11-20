@@ -5,7 +5,7 @@
   import ArchiveBrowseRecovery, { type ArchiveBrowseRecoveryState } from "./ArchiveBrowseRecovery.svelte";
 
   let {
-    title, label, value, placeholder = "", status, hint = "", cancelLabel, submittingLabel, error = null,
+    title, label, value, placeholder = "", status, hint = "", cancelLabel, submittingLabel, error = null, notice = null,
     rootClass, rootVariables, onChange, onSubmit, onClose,
     disabled = false, recovery = null, retryLabel, onRetry, cancelWhileSubmitting = false,
   }: {
@@ -18,6 +18,7 @@
     cancelLabel: string;
     submittingLabel: string;
     error?: string | null;
+    notice?: string | null;
     disabled?: boolean;
     cancelWhileSubmitting?: boolean;
     recovery?: ArchiveBrowseRecoveryState;
@@ -43,26 +44,29 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (submitting || disabled) return;
+    panel.focus({ preventScroll: true });
     submitting = true;
     try {
       await onSubmit();
     } finally {
       submitting = false;
       await tick();
-      if (input?.isConnected && !input.disabled) input.focus({ preventScroll: true });
+      if (input?.isConnected && document.activeElement === panel) input.focus({ preventScroll: true });
     }
   }
 
   async function retry() {
-    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const trigger = document.activeElement;
+    if (trigger instanceof HTMLButtonElement && panel.contains(trigger)) panel.focus({ preventScroll: true });
     await onRetry();
     await tick();
-    if (!input?.isConnected || (document.activeElement !== document.body && document.activeElement !== trigger)) return;
-    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+    if (!input?.isConnected || document.activeElement !== panel) return;
+    if (trigger instanceof HTMLButtonElement && trigger.isConnected && !trigger.disabled) trigger.focus({ preventScroll: true });
     else input.focus({ preventScroll: true });
   }
 
   function onKeydown(event: KeyboardEvent) {
+    if (event.isComposing || event.defaultPrevented) return;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -109,6 +113,7 @@
         <p id={`${id}-status`} class="archive-editor-status" role="status">{submitting ? submittingLabel : status}</p>
       {/if}
       <p id={`${id}-hint`} class="archive-editor-hint">{hint}</p>
+      {#if notice}<div class="surface-notice" role="status">{notice}</div>{/if}
       <footer class="archive-editor-actions">
         <button type="button" disabled={submitting && !cancelWhileSubmitting} onclick={onClose}>{cancelLabel}</button>
         <button class="primary" type="submit" disabled={submitting || disabled}>{submitting ? submittingLabel : title}</button>

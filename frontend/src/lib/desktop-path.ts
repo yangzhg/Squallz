@@ -29,7 +29,7 @@ function canonicalWindowsPath(path: string): string {
   return unc ? `/${collapsed}` : collapsed;
 }
 
-function isAbsoluteDesktopPath(path: string, platform: DesktopPathPlatform): boolean {
+export function isAbsoluteDesktopPath(path: string, platform: DesktopPathPlatform): boolean {
   if (platform !== "windows") return path.startsWith("/");
   const normalized = canonicalWindowsPath(path);
   return /^[a-z]:\//iu.test(normalized) || /^\/\/[^/]+\/[^/]+/u.test(normalized);

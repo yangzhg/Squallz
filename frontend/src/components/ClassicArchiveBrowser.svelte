@@ -45,7 +45,7 @@
     onCancelMoveConflict,
     onSubmitMoveReadyOnly,
     onSubmitMoveKeepBoth,
-    onBrowseScroll,
+    mountBrowseViewport,
     onSort,
     onSelectEntry,
     onActivateEntry,
@@ -174,7 +174,7 @@
         class="virtual-scroll classic-virtual-scroll"
         role="rowgroup"
         data-virtual-list="classic"
-        onscroll={onBrowseScroll}
+        use:mountBrowseViewport
       >
         <div
           class="virtual-pad"
