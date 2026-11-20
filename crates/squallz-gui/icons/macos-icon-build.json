@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "source_sha256": "c8386f791bf3a6fc54d98638f44ec7ed72324c7d40417fec5b327de3594eec24",
-  "assets_car_sha256": "0dc5559844a5e1848d9c7ad58913943f08c8395ca653cb1013026c0fade6c937",
-  "xcode_version": "26.6",
-  "xcode_build": "17F113",
+  "source_sha256": "fbcd3f22b4f62e3ce0da8224128040f09ecf9f956b72f4896d5af10849b9ef98",
+  "assets_car_sha256": "86c75e6cb0835fe7d3be5fd497f3eb1c5a2f879a9c9639c2ed0288c1ada2a37d",
+  "xcode_version": "27.2",
+  "xcode_build": "27B52",
   "minimum_macos": "11.0"
 }

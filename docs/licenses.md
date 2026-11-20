@@ -161,8 +161,7 @@ tauri 的传递依赖树较大（wry/tao/objc2 系、muda 等），均为 MIT/Ap
 | 素材 | 许可证 | 说明 |
 | ---- | ---- | ---- |
 | Lucide 图标（lucide.dev） | ISC | 前端以内联 SVG path 子集使用（frontend/src/components/Icon.svelte），线宽 1.75 |
-| Squallz app icon | 项目自有 | 用户选定的拉链图标，经透明底适配后保存为 `crates/squallz-gui/icons/squallz-icon-source.png`，并生成桌面、应用内图标与 macOS Icon Composer 资源 |
-| 现代工作区插图 | 项目自有品牌素材衍生 | `frontend/src/assets/archive-workspace.webp` 以 Squallz 应用内拉链图标为参考，通过图像生成制作透明立体插图 |
+| Squallz 应用图标与工作区插图 | 项目自有品牌素材衍生 | 以项目原有拉链图标为参考，通过图像生成制作透明立体原画，保存为 `crates/squallz-gui/icons/squallz-icon-source.png`。桌面图标、应用内图标、macOS Icon Composer 资源和工作区插图 `frontend/src/assets/archive-workspace.webp` 均使用这张原画。 |
 
 ## PAR2 外部工具桥接
 

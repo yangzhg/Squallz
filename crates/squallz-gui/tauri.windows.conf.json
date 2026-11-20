@@ -2,6 +2,12 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    },
     "resources": {
       "../../target/release/sqz-sfx-template.stub": "bin/sqz-sfx.stub"
     }
