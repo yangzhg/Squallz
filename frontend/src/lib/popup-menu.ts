@@ -31,6 +31,12 @@ export function popupMenuPosition(
   };
 }
 
+/** Let Svelte retain the inert menu for its CSS opacity transition. */
+export function popupPresence(node: HTMLElement): { duration: number } {
+  const seconds = node.ownerDocument.defaultView?.getComputedStyle(node).transitionDuration;
+  return { duration: (Number.parseFloat(seconds ?? "") || 0) * 1000 };
+}
+
 /** Positions an anchored menu and keeps its keyboard interaction in that menu. */
 export function popupMenu(node: HTMLElement, initial: PopupMenuOptions) {
   let options = initial;
@@ -65,6 +71,7 @@ export function popupMenu(node: HTMLElement, initial: PopupMenuOptions) {
       height: document.documentElement.clientHeight || view.innerHeight,
     }, padding, gap, options.anchor?.getBoundingClientRect(), options.point);
     variables.update({ "--popup-left": `${x}px`, "--popup-top": `${y}px` });
+    node.setAttribute("data-positioned", "");
   }
 
   function focusFirst(): void {
@@ -100,13 +107,21 @@ export function popupMenu(node: HTMLElement, initial: PopupMenuOptions) {
   }
 
   function onFocusIn(event: FocusEvent): void {
+    if (node.inert) return;
     const target = event.target as HTMLElement | null;
     if (!target || node.contains(target) || target === options.anchor) return;
     if (typeof target.focus === "function" && isElementAvailableForFocus(target)) close(false);
   }
 
+  function onIntroStart(): void {
+    if (node.inert) return;
+    // Svelte can reuse this action when an outro is reversed.
+    closing = false;
+    if (!node.contains(document.activeElement)) focusFirst();
+  }
+
   function onKeydown(event: KeyboardEvent): void {
-    if (closing || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+    if (node.inert || closing || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -143,6 +158,7 @@ export function popupMenu(node: HTMLElement, initial: PopupMenuOptions) {
   }
 
   node.addEventListener("keydown", onKeydown);
+  node.addEventListener("introstart", onIntroStart);
   view?.addEventListener("resize", position);
   document.addEventListener("scroll", onScroll, true);
   document.addEventListener("focusin", onFocusIn);
@@ -172,10 +188,12 @@ export function popupMenu(node: HTMLElement, initial: PopupMenuOptions) {
       destroyed = true;
       observer?.disconnect();
       node.removeEventListener("keydown", onKeydown);
+      node.removeEventListener("introstart", onIntroStart);
       view?.removeEventListener("resize", position);
       document.removeEventListener("scroll", onScroll, true);
       document.removeEventListener("focusin", onFocusIn);
       variables.destroy();
+      node.removeAttribute("data-positioned");
       if (originalRootTabIndex === null) node.removeAttribute("tabindex");
       else node.setAttribute("tabindex", originalRootTabIndex);
       for (const [item, value] of originalTabIndexes) {

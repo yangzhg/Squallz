@@ -49,6 +49,13 @@
           ? "hourglass"
           : "archive",
   );
+
+  let headingElement: HTMLHeadingElement;
+
+  function retry(event: MouseEvent) {
+    if (document.activeElement === event.currentTarget) headingElement.focus();
+    onRetry();
+  }
 </script>
 
 <section
@@ -64,7 +71,7 @@
   <header>
     <div>
       {#if variant === "classic"}<span>{eyebrow}</span>{/if}
-      <h2>{heading}</h2>
+      <h2 tabindex="-1" bind:this={headingElement}>{heading}</h2>
     </div>
     <strong class="extract-plan-status"><Icon name={statusIcon} size={15} />{statusLabel}</strong>
   </header>
@@ -84,16 +91,8 @@
       {/each}
     </dl>
     <p class="extract-plan-note">{note}</p>
-    {#if phase === "blocked"}
-      <button type="button" class="extract-plan-retry" onclick={onRetry}>
-        <Icon name="rotate-cw" size={15} />{retryLabel}
-      </button>
-    {/if}
   {:else if phase === "error"}
     <p class="extract-plan-error">{error}</p>
-    <button type="button" class="extract-plan-retry" onclick={onRetry}>
-      <Icon name="rotate-cw" size={15} />{retryLabel}
-    </button>
   {:else}
     <p>{description}</p>
     {#if phase === "loading"}
@@ -105,5 +104,10 @@
         <Icon name="archive" size={28} />
       </div>
     {/if}
+  {/if}
+  {#if phase === "blocked" || phase === "error"}
+    <button type="button" class="extract-plan-retry" onclick={retry}>
+      <Icon name="rotate-cw" size={15} />{retryLabel}
+    </button>
   {/if}
 </section>

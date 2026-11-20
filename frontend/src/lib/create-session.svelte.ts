@@ -173,11 +173,6 @@ export class CreateSession {
     this.section = section;
     this.port.scrollSection(target);
   };
-  toggleAdvanced = (event: KeyboardEvent): void => {
-    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
-    event.preventDefault();
-    this.advancedOpen = !this.advancedOpen;
-  };
   updateLevelFromInput = (event: Event, commit = false) => this.updateCustomLevel((event.currentTarget as HTMLInputElement).value, commit);
   normalizeNotice = (change: CreateDraftChange): void => {
     if (change.postSuccessNormalized) {

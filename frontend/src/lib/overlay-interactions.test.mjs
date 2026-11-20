@@ -19,7 +19,7 @@ function keyboardEvent(key = "Escape") {
 
 function menuHarness() {
   const [mount] = selectMountCallbacks(app, ["closeQuickActions"]);
-  const functions = selectFunctions(app, ["closeQuickActions", "closeEntryContext"]);
+  const functions = selectFunctions(app, ["toggleQuickActions", "closeQuickActions", "closeEntryContext"]);
   const listeners = {};
   const restored = [];
   class Element {
@@ -68,6 +68,16 @@ test("App ignores a key already consumed by the focused overlay", () => {
   assert.equal(run.context.shortcutCalls, 0);
   assert.equal(run.context.workflowCalls, 0);
   assert.equal(run.restored.length, 0);
+});
+
+test("closing quick actions from the opener restores focus when a pointer left it inside the menu", () => {
+  const run = menuHarness();
+  vm.runInContext("toggleQuickActions()", run.context);
+  assert.equal(run.context.activePopover, "quickActions");
+  assert.equal(run.restored.length, 0);
+  vm.runInContext("toggleQuickActions()", run.context);
+  assert.equal(run.context.activePopover, null);
+  assert.deepEqual(run.restored, [[run.context.quickActionPopover, run.context.quickActionButton]]);
 });
 
 test("outside pointer dismissal leaves focus to the clicked control", () => {

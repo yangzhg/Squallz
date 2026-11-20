@@ -2399,9 +2399,16 @@ select option {
   overscroll-behavior: contain;
 }
 
+.task-center-surface {
+  grid-row: 2;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+}
+
 .task-center-panel,
 .task-center-detail {
-  grid-row: 2;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -2427,7 +2434,7 @@ select option {
   grid-template-rows: minmax(0, 1fr);
 }
 
-.task-center-layout > .task-surface-shell {
+.task-center-surface > .task-surface-shell {
   align-self: start;
   height: auto;
   max-height: 100%;
@@ -7867,6 +7874,11 @@ select option {
   line-height: var(--type-title-line);
 }
 
+.extract-plan-summary h2:focus-visible {
+  outline: var(--border-width-focus) solid var(--color-focus-ring);
+  outline-offset: var(--space-xs);
+}
+
 .extract-plan-summary > p {
   color: var(--color-text-secondary);
   font-size: var(--type-control);
@@ -8083,6 +8095,15 @@ select option {
 .design-root .destination-grid button:hover:not(:disabled, .selected) {
   background: var(--button-secondary-bg-hover);
   color: var(--button-secondary-fg-hover);
+}
+
+.extract-destination-check {
+  flex: none;
+  opacity: 0;
+}
+
+.destination-grid button.selected .extract-destination-check {
+  opacity: 1;
 }
 
 .extract-policy-fields {
@@ -12009,14 +12030,12 @@ input.secure-input {
   border-radius: inherit;
   background: var(--progress-fill-bg);
   box-shadow: var(--progress-fill-shadow);
-  transition: width var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 .design-root :where(.task-modal-progress-block progress, .meter-progress)::-moz-progress-bar {
   border-radius: inherit;
   background: var(--progress-fill-bg);
   box-shadow: var(--progress-fill-shadow);
-  transition: width var(--motion-duration-base) var(--motion-ease-standard);
 }
 
 dl {
@@ -15154,28 +15173,43 @@ select.classic-input:focus {
       box-shadow var(--motion-duration-fast) var(--motion-ease-standard);
   }
 
+  :is(.modern-create, .classic-create) :is(.create-advanced-disclosure, .workspace-summary-disclosure)[open] > :not(summary),
+  :is(.modern-create, .classic-create) .create-plan-review > :is(.create-plan-review-copy, .create-plan-review-metrics),
+  :is(.modern-extract, .classic-extract, .modern-create, .classic-create) .archive-preset-manager {
+    animation: content-fade var(--motion-duration-fast) var(--motion-ease-standard);
+  }
+
+  .extract-destination-check {
+    transition: opacity var(--motion-duration-fast) var(--motion-ease-standard);
+  }
+
   .settings-route-scroll::before,
   .settings-route-scroll::after {
     transition: opacity var(--motion-duration-fast) var(--motion-ease-standard);
   }
 
-  :is(.first-run-brand, .task-window-empty, .archive-start-mark) .app-icon {
+  .quick-popover,
+  .entry-context-menu {
+    transition: opacity var(--motion-duration-instant) var(--motion-ease-standard);
+  }
+
+  :is(.quick-popover, .entry-context-menu):is(:not([data-positioned]), [inert]) {
+    opacity: 0;
+  }
+
+  :is(.first-run-brand, .task-window-empty) .app-icon {
     animation: app-icon-breathe var(--motion-brand-pulse) var(--motion-ease-standard) var(--motion-brand-iterations);
   }
 
   .first-run-panel,
   .task-window-empty,
-  .archive-start-state,
   .toast-card,
-  .task-center-panel,
-  .task-center-detail,
   .sfx-publish-card {
     animation: surface-enter var(--motion-duration-base) var(--motion-ease-standard) backwards;
   }
 
-  .task-center-panel,
-  .task-center-detail {
-    animation-name: task-center-enter;
+  .task-center-surface {
+    animation: task-center-enter var(--motion-duration-base) var(--motion-ease-standard) backwards;
   }
 
   .classic-property-sheet {
@@ -15183,16 +15217,19 @@ select.classic-input:focus {
   }
 
   .first-run-modern-card,
-  .first-run-classic-card,
+  .first-run-classic-card {
+    animation: content-enter var(--motion-duration-base) var(--motion-ease-standard) backwards;
+  }
+
+  .recent-workspace,
+  .archive-start-state,
+  .modern-convert > .sheet-head,
   .modern-extract > .sheet-head,
   .settings-view > .sheet-head,
   .appearance-view > .sheet-head,
   .colors-view > .sheet-head,
   .integration-view > .sheet-head,
-  .classic-property-sheet > header {
-    animation: content-enter var(--motion-duration-base) var(--motion-ease-standard) backwards;
-  }
-
+  .classic-property-sheet > header,
   .modern-create > .create-source-list,
   .modern-create > .create-workflow,
   .modern-convert > .create-workflow,
@@ -15233,6 +15270,14 @@ select.classic-input:focus {
 
   .task-modal-card[data-task-active="true"] .task-modal-progress-block progress {
     box-shadow: var(--progress-active-track-shadow);
+  }
+
+  .design-root :where(.task-modal-card[data-task-active="true"] progress[value], .meter-progress)::-webkit-progress-value {
+    transition: width var(--motion-duration-base) var(--motion-ease-standard);
+  }
+
+  .design-root :where(.task-modal-card[data-task-active="true"] progress[value], .meter-progress)::-moz-progress-bar {
+    transition: width var(--motion-duration-base) var(--motion-ease-standard);
   }
 
   .task-modal-card[data-task-active="true"] .task-modal-progress-block progress::-webkit-progress-value {
@@ -15309,7 +15354,9 @@ select.classic-input:focus {
   .first-run-modern-card,
   .first-run-classic-card,
   .task-window-empty,
+  .recent-workspace,
   .archive-start-state,
+  .modern-convert > .sheet-head,
   .modern-create > .create-source-list,
   .modern-create > .create-workflow,
   .modern-convert > .create-workflow,
@@ -15328,8 +15375,7 @@ select.classic-input:focus {
   .integration-view > .integration-layout,
   .classic-property-sheet > header,
   .toast-card,
-  .task-center-panel,
-  .task-center-detail,
+  .task-center-surface,
   .sfx-publish-card,
   .app-icon {
     animation: none;
@@ -15361,6 +15407,16 @@ select.classic-input:focus {
 
 .design-root :is(button:disabled, button:hover, button:focus-visible) :is(svg, span, strong, small) {
   color: inherit;
+}
+
+.design-root :is(.task-modal-actions, .task-center-actions) button[aria-disabled="true"] {
+  border-color: var(--color-control-disabled-border);
+  background: var(--color-control-disabled-bg);
+  color: var(--color-control-disabled-fg);
+  transform: none;
+  filter: none;
+  box-shadow: none;
+  cursor: progress;
 }
 
 .design-root :is(.modern-row, .classic-row) :is(.row-preview-button, .archive-entry-location):focus-visible {

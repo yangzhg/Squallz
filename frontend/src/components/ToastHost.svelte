@@ -7,6 +7,7 @@
     pushToast,
     dismissToast,
     removeToast,
+    setToastReading,
     setToastsBlocked,
     toasts,
     type Toast,
@@ -47,6 +48,28 @@
     return "info";
   }
 
+  function trackReading(node: HTMLElement, id: number) {
+    let hovered = node.matches(":hover") && matchMedia("(any-hover: hover)").matches;
+    let focused = node.contains(node.ownerDocument.activeElement);
+    const sync = () => setToastReading(id, hovered || focused);
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    function onPointer(event: PointerEvent) {
+      if (event.pointerType === "touch") return;
+      hovered = event.type === "pointerenter";
+      sync();
+    }
+    node.addEventListener("pointerenter", onPointer, options);
+    node.addEventListener("pointerleave", onPointer, options);
+    node.addEventListener("focusin", () => { focused = true; sync(); }, options);
+    node.addEventListener("focusout", (event) => {
+      focused = event.relatedTarget instanceof Node && node.contains(event.relatedTarget);
+      sync();
+    }, options);
+    sync();
+    return { destroy() { controller.abort(); setToastReading(id, false); } };
+  }
+
   async function runToastAction(toast: Toast): Promise<void> {
     if (!toast.action || runningActionIds.includes(toast.id)) return;
     runningActionIds = [...runningActionIds, toast.id];
@@ -73,6 +96,7 @@
   >
     {#each toasts() as toast (toast.id)}
       <article
+        use:trackReading={toast.id}
         class={`toast-card kind-${toast.kind}`}
         role={toast.kind === "danger" ? "alert" : "status"}
         aria-live={toast.kind === "danger" ? "assertive" : "polite"}

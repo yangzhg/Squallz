@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createTestServer } from "../../tests/runtime.mjs";
+import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
 
 test("modal views hide toast controls without discarding their notifications", async () => {
   const server = await createTestServer();
@@ -244,4 +245,62 @@ test("priority preemption and keyed removal preserve blocked queues and visible-
     assert.deepEqual(toasts().map((toast) => toast.title), ["recovery"]);
     dismissToast(toasts()[0].id);
     assert.equal(toasts().length, 0);
+  }));
+
+test("hover and focus pause one toast until both end, including moves between its controls", (context) =>
+  withToastClock(context, ({ pushToast, toasts, setToastReading, setToastsBlocked, advance }) => {
+    pushToast({ kind: "info", title: "reading" });
+    pushToast({ kind: "success", title: "neighbor" });
+    advance(1000);
+    const id = toasts()[0].id;
+    const source = readSvelteScript(new URL("../components/ToastHost.svelte", import.meta.url), "ToastHost.svelte");
+    const control = new EventTarget();
+    const node = Object.assign(new EventTarget(), {
+      matches: () => false, contains: (target) => target === control, ownerDocument: { activeElement: null },
+    });
+    const { trackReading } = evaluateFunctions(source, ["trackReading"], { setToastReading, Node: EventTarget, AbortController });
+    const actions = trackReading(node, id);
+    const send = (type, detail = {}) => node.dispatchEvent(Object.assign(new Event(type), detail));
+    send("pointerenter", { pointerType: "mouse" });
+    send("focusin");
+    send("pointerleave", { pointerType: "mouse" });
+    send("focusout", { relatedTarget: control });
+    advance(60_000);
+    assert.deepEqual(toasts().map((toast) => toast.title), ["reading"]);
+    send("focusout", { relatedTarget: null });
+    send("pointerenter", { pointerType: "touch" });
+    advance(1000);
+    send("pointerenter", { pointerType: "mouse" });
+    setToastsBlocked(true);
+    actions.destroy();
+    send("focusin");
+    advance(60_000);
+    setToastsBlocked(false);
+    advance(1999);
+    assert.equal(toasts().length, 1);
+    advance(1);
+    assert.equal(toasts().length, 0);
+  }));
+
+test("unmounting a displaced toast clears its reading hold and preserves its remaining time in the queue", (context) =>
+  withToastClock(context, ({ pushToast, toasts, setToastReading, setToastsBlocked, removeToastByKey, advance, pending }) => {
+    pushToast({ kind: "info", title: "reading" });
+    pushToast({ kind: "danger", title: "urgent" });
+    pushToast({ kind: "danger", title: "persistent" });
+    const id = toasts().find((toast) => toast.title === "reading").id;
+    advance(1500);
+    setToastReading(id, true);
+    setToastsBlocked(true);
+    setToastsBlocked(false);
+    assert.equal(pending.size, 0, "an active reading hold outlasts the modal hold");
+    pushToast({ kind: "warning", key: "interrupt", title: "urgent warning" });
+    assert.equal(toasts().some((toast) => toast.id === id), false);
+    setToastReading(id, false);
+    assert.equal(pending.size, 1, "only the visible warning runs a timer");
+    advance(1000);
+    removeToastByKey("interrupt");
+    advance(2499);
+    assert.ok(toasts().some((toast) => toast.id === id));
+    advance(1);
+    assert.equal(toasts().some((toast) => toast.id === id), false);
   }));

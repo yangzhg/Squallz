@@ -265,6 +265,20 @@
     onFilter(value);
   }
 
+  $effect.pre(() => {
+    void orderedRows;
+    // A single listed task can finish without changing its row order.
+    void counts;
+    const focused = document.activeElement;
+    if (!(focused instanceof HTMLElement) || !panel?.contains(focused)) return;
+    const row = focused.closest(".task-center-row");
+    void tick().then(() => {
+      if (!panel?.isConnected || panel.closest("[inert]") || document.activeElement !== document.body) return;
+      const details = row?.isConnected ? row.querySelector<HTMLButtonElement>("[data-task-details-id]") : null;
+      (details ?? closeButton)?.focus({ preventScroll: true });
+    });
+  });
+
   onMount(() => {
     void tick().then(async () => {
       if (focusTaskId !== null && filter !== "all" && !orderedRows.some((task) => task.id === focusTaskId)) {
@@ -417,13 +431,14 @@
           role="group"
           aria-label={tr("gui.task_center.actions_for").replace("{name}", taskTitleLabel(task))}
         >
-          {#if task.state === "running" && task.interruptible && task.pausable}
-            <button type="button" disabled={taskControlsBusy(task)} onclick={() => onPause(task)}>
-              <Icon name="pause" size={14} />{taskPauseButtonLabel(task)}
-            </button>
-          {:else if task.state === "paused"}
-            <button type="button" disabled={taskControlsBusy(task)} onclick={() => onResume(task)}>
-              <Icon name="play" size={14} />{taskResumeButtonLabel(task)}
+          {#if (task.state === "running" && task.interruptible && task.pausable) || task.state === "paused"}
+            {@const paused = task.state === "paused"}
+            <button
+              type="button"
+              aria-disabled={taskControlsBusy(task) || undefined}
+              onclick={() => { if (!taskControlsBusy(task)) (paused ? onResume : onPause)(task); }}
+            >
+              <Icon name={paused ? "play" : "pause"} size={14} />{paused ? taskResumeButtonLabel(task) : taskPauseButtonLabel(task)}
             </button>
           {/if}
           {#if queuePosition && queuePositions.size > 1}
@@ -459,8 +474,8 @@
             <button
               class="danger"
               type="button"
-              disabled={taskControlsBusy(task)}
-              onclick={() => onCancel(task)}
+              aria-disabled={taskControlsBusy(task) || undefined}
+              onclick={() => { if (!taskControlsBusy(task)) onCancel(task); }}
             ><Icon name={task.controlIntent === "cancel" ? "hourglass" : "x-circle"} size={14} />{taskCancelButtonLabel(task)}</button>
           {/if}
         </div>

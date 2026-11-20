@@ -156,6 +156,7 @@
   let passwordErrorId = $derived(taskElementId("password-error"));
   let actionFailure = $derived(taskActionFailureMessage(task));
   let passwordFeedback = $derived(passwordError || actionFailure);
+  let pauseAvailable = $derived(task.state === "paused" || (task.state === "running" && task.interruptible && task.pausable));
   let focusIdentity = $derived(`${presentation}:${task.id ?? "submitting"}:${Boolean(passwordQuestion)}:${Boolean(conflictQuestion)}`);
 
   function taskElementId(suffix: string): string {
@@ -212,6 +213,19 @@
     void tick().then(() => {
       const target = passwordInput ?? taskCard;
       if (target?.isConnected && !target.closest("[inert]")) target.focus({ preventScroll: true });
+    });
+  });
+
+  $effect.pre(() => {
+    void task.state;
+    void task.interruptible;
+    void pauseAvailable;
+    if (!taskCard?.contains(document.activeElement)) return;
+    const card = taskCard;
+    void tick().then(() => {
+      if (card.isConnected && !card.closest("[inert]") && document.activeElement === document.body) {
+        card.focus({ preventScroll: true });
+      }
     });
   });
 
@@ -286,7 +300,7 @@
         {/if}
         <h2 id={titleId}>{taskTitleLabel(task)}</h2>
       </div>
-      <strong class={`task-modal-state state-${displayedTaskTone()}`}>{displayedTaskState()}</strong>
+      <strong class={`task-modal-state state-${displayedTaskTone()}`} role="status">{displayedTaskState()}</strong>
     </header>
 
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (focusable scroll region) -->
@@ -299,6 +313,7 @@
     >
     {#if notice && (passwordQuestion || conflictQuestion)}<div class="surface-notice" role="status">{notice}</div>{/if}
     {#if !isTaskActiveState(task.state)}
+      {@const nextStep = taskNextStepDetail(task, taskWindowMode)}
       <section
         class="task-result-callout"
         class:danger={task.state === "failed"}
@@ -311,10 +326,12 @@
           <span>{taskDialogResultSummary(task)}</span>
         </div>
       </section>
-      <section class="task-next-step" aria-label={tr("gui.task.next_step")}>
-        <strong>{tr("gui.task.next_step")}</strong>
-        <span>{taskNextStepDetail(task, taskWindowMode)}</span>
-      </section>
+      {#if nextStep}
+        <section class="task-next-step" aria-label={tr("gui.task.next_step")}>
+          <strong>{tr("gui.task.next_step")}</strong>
+          <span>{nextStep}</span>
+        </section>
+      {/if}
     {/if}
     {#if taskPhaseControlNoticeVisible(task)}
       <section class="task-control-callout" aria-live="polite">
@@ -455,13 +472,15 @@
             <strong>{taskCurrentProgressBadge(task)}</strong>
           </div>
           {#if hasTaskCurrentProgress(task)}
-            <progress
-              data-task-progress="current-file"
-              data-task-progress-source="engine-bytes"
-              value={taskCurrentProgressPercent(task)}
-              max="100"
-              aria-label={taskCurrentSectionLabel(task)}
-            ></progress>
+            {#key task.current}
+              <progress
+                data-task-progress="current-file"
+                data-task-progress-source="engine-bytes"
+                value={taskCurrentProgressPercent(task)}
+                max="100"
+                aria-label={taskCurrentSectionLabel(task)}
+              ></progress>
+            {/key}
             <p>{taskCurrentProgressSummary(task)}</p>
           {:else}
             <div
@@ -589,19 +608,20 @@
           <Icon name="hourglass" size={15} />{tr("gui.task.starting")}
         </button>
       {:else}
-        {#if task.state === "running" && task.interruptible && task.pausable}
-          <button type="button" disabled={task.controlIntent !== null} onclick={() => onPause(task)}>
-            <Icon name="pause" size={15} />{taskPauseButtonLabel(task)}
-          </button>
-        {/if}
-        {#if task.state === "paused"}
-          <button type="button" disabled={task.controlIntent !== null} onclick={() => onResume(task)}>
-            <Icon name="play" size={15} />{taskResumeButtonLabel(task)}
+        {#if pauseAvailable}
+          {@const paused = task.state === "paused"}
+          <button
+            type="button"
+            aria-disabled={task.controlIntent !== null || undefined}
+            onclick={() => { if (task.controlIntent === null) (paused ? onResume : onPause)(task); }}
+          >
+            <Icon name={paused ? "play" : "pause"} size={15} />{paused ? taskResumeButtonLabel(task) : taskPauseButtonLabel(task)}
           </button>
         {/if}
         {#if isTaskActiveState(task.state)}
           {#if task.interruptible}
-            <button class="danger" type="button" disabled={task.controlIntent === "cancel"} onclick={() => onCancel(task)}>
+            <button class="danger" type="button" aria-disabled={task.controlIntent === "cancel" || undefined}
+              onclick={() => { if (task.controlIntent !== "cancel") onCancel(task); }}>
               <Icon name={task.controlIntent === "cancel" ? "hourglass" : "x-circle"} size={15} />{taskCancelButtonLabel(task)}
             </button>
           {/if}

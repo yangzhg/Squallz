@@ -103,7 +103,7 @@
                 aria-label={labelWithDisabledReason(choice.label, choice.reason)}
                 onclick={() => void session.selectDestination(choice.mode)}
               >
-                {#if session.state.destinationMode === choice.mode}<Icon name="check" size={15} />{/if}
+                <Icon name="check" size={15} class="extract-destination-check" />
                 {choice.label}
               </button>
             {/each}

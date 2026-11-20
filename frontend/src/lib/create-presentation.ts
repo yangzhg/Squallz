@@ -646,11 +646,6 @@ export class CreatePresentation {
         items: this.setupSummaryItems(),
       },
       preset: { instanceId: `${variant}-create`, variant, compact: false, kind: "create", session: this.session.port.presets() },
-      advanced: {
-        open: this.session.advancedOpen,
-        onToggle: (open) => (this.session.advancedOpen = open),
-        onKeydown: this.session.toggleAdvanced,
-      },
       output: {
         instanceId: `${variant}-create-output`,
         variant,

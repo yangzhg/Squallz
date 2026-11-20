@@ -675,7 +675,8 @@ test("SFX result and recovery details use the durable single-backup contract", a
     const passedTest = { ...boundedTest, result: { ...boundedTest.result, ok: true, problems: [], problems_total: 0 } };
     assert.equal(taskHasInlineResults(passedTest), true);
     assert.equal(taskReviewScreen(passedTest), null);
-    assert.equal(taskNextStepDetail(passedTest, false), "Review the result details in this window, then close it.");
+    assert.equal(taskNextStepDetail(passedTest, false), "");
+    assert.equal(taskNextStepDetail(passedTest, true), "Review the result details in this window, then close it.");
     assert.equal(taskReviewScreen({ ...boundedTest, state: "running" }), null);
     assert.equal(taskReviewScreen({ ...boundedTest, state: "cancelled" }), null);
     assert.equal(taskReviewScreen({ ...boundedTest, state: "failed", error: { key: "error.corrupt_archive" } }), "recovery");

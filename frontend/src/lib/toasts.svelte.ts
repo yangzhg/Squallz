@@ -30,6 +30,7 @@ interface ToastTimer {
 }
 
 const timers = new Map<number, ToastTimer>();
+const reading = new Set<number>();
 let presentationBlocked = false;
 let nextId = 1;
 
@@ -51,6 +52,20 @@ export function setToastsBlocked(blocked: boolean): void {
   for (const toast of store.visible) {
     if (blocked) pauseToastTimer(toast.id);
     else startToastTimer(toast);
+  }
+}
+
+/** Count the remaining time only after the reader leaves this notification. */
+export function setToastReading(id: number, active: boolean): void {
+  if (reading.has(id) === active) return;
+  const toast = store.visible.find((entry) => entry.id === id);
+  if (active) {
+    if (!toast) return;
+    reading.add(id);
+    pauseToastTimer(id);
+  } else {
+    reading.delete(id);
+    if (toast) startToastTimer(toast);
   }
 }
 
@@ -114,7 +129,7 @@ function show(toast: Toast): void {
 
 function startToastTimer(toast: Toast): void {
   const duration = toast.action || toast.persistent ? 0 : DURATION[toast.kind];
-  if (duration === 0 || presentationBlocked) return;
+  if (duration === 0 || presentationBlocked || reading.has(toast.id)) return;
   let timer = timers.get(toast.id);
   if (!timer) {
     timer = { remaining: duration, startedAt: null, handle: null };
@@ -139,6 +154,7 @@ function pauseToastTimer(id: number): void {
 }
 
 function clearToastTimer(id: number): void {
+  reading.delete(id);
   pauseToastTimer(id);
   timers.delete(id);
 }

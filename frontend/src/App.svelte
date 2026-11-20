@@ -76,7 +76,7 @@
   import { appActionAvailability, appActionForShortcut, dispatchAppAction, isTextEditingTarget, type AppAction } from "./lib/app-actions";
   import { connectNativeMenu, type NativeMenuConnection } from "./lib/native-menu";
   import { restoreModalFocus, trapModalFocus } from "./lib/modal-focus";
-  import { popupMenu } from "./lib/popup-menu";
+  import { popupMenu, popupPresence } from "./lib/popup-menu";
   import type { UpdateCheckPreview } from "./lib/app-update.svelte";
   import {
     adoptOpenedArchive,
@@ -454,6 +454,7 @@
   );
   let conflictApplyAll = $state(false);
   let appNotice = $state<string | null>(null);
+  let queuedNoticeId = $state<number | null>(null);
   let sourceCleanupRecoveryReady = $state(false);
   let sourceCleanupRecoveryStartupRequested = false;
   let sourceCleanupRecoveryLastGeneration = 0;
@@ -1959,8 +1960,12 @@
   }
 
   function toggleQuickActions() {
+    if (activePopover === "quickActions") {
+      closeQuickActions();
+      return;
+    }
     closeEntryContext(false);
-    activePopover = activePopover === "quickActions" ? null : "quickActions";
+    activePopover = "quickActions";
   }
 
   function closeQuickActions(restoreFocus = true) {
@@ -4776,8 +4781,8 @@
       return false;
     }
     try {
-      await submitJob(spec);
-      showNotice(success);
+      const id = await submitJob(spec);
+      showNotice(success, id);
       return true;
     } catch (error) {
       if (isJobSubmitBlocked(error)) {
@@ -6649,8 +6654,15 @@
     noticeTimer = null;
   }
 
-  function showNotice(message: string) {
+  $effect(() => {
+    if (appNotice && queuedNoticeId !== null && !jobRows.some((task) => task.id === queuedNoticeId && task.state === "queued")) {
+      clearNotice();
+    }
+  });
+
+  function showNotice(message: string, queuedJobId: number | null = null) {
     clearNotice();
+    queuedNoticeId = queuedJobId;
     appNotice = message;
     noticeTimer = setTimeout(() => {
       appNotice = null;
@@ -6963,19 +6975,21 @@
 
   {#if taskCenterVisible()}
     {@const selectedTask = taskCenterSelectedTask()}
-    {#if selectedTask}
-      {@render taskProgressSurface(selectedTask, "panel")}
-    {:else}
-      <TaskCenterHost
-        surface={taskCenterSurface()}
-        loadingTitle={tr("gui.task_surface.center_loading")}
-        loadingBody={tr("gui.task_surface.center_loading_body")}
-        failureTitle={tr("gui.task_surface.center_load_failed")}
-        failureBody={tr("gui.task_surface.center_load_failed_body")}
-        retryLabel={tr("gui.task_surface.retry")}
-        closeLabel={tr("gui.task_center.close")}
-      />
-    {/if}
+    <div class="task-center-surface">
+      {#if selectedTask}
+        {@render taskProgressSurface(selectedTask, "panel")}
+      {:else}
+        <TaskCenterHost
+          surface={taskCenterSurface()}
+          loadingTitle={tr("gui.task_surface.center_loading")}
+          loadingBody={tr("gui.task_surface.center_loading_body")}
+          failureTitle={tr("gui.task_surface.center_load_failed")}
+          failureBody={tr("gui.task_surface.center_load_failed_body")}
+          retryLabel={tr("gui.task_surface.retry")}
+          closeLabel={tr("gui.task_center.close")}
+        />
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -7052,6 +7066,7 @@
     class={`entry-context-menu themed-root palette-${settingsSession.colors.palette} theme-${activeTheme}`}
     use:cssVariables={customPaletteVariables()}
     use:popupMenu={{ point: entryContext, anchor: entryContextReturnFocus, onClose: closeEntryContext }}
+    transition:popupPresence
     role="menu"
     aria-label={tr("gui.context.actions_for").replace("{name}", entryContext.name)}
     aria-hidden={blockingModalVisible() || modeSelectionBlocked ? "true" : undefined}
@@ -7228,10 +7243,10 @@
 
       {#if activePopover === "quickActions"}
         <div bind:this={quickActionPopover} class="quick-popover" role="menu" aria-label={tr("gui.quick.title")}
-          use:popupMenu={{ anchor: quickActionButton, onClose: closeQuickActions }}>
+          use:popupMenu={{ anchor: quickActionButton, onClose: closeQuickActions }} transition:popupPresence>
           <div class="quick-popover-head">
             <strong>{tr("gui.quick.title")}</strong>
-            <span>{tr("gui.quick.subtitle")}</span>
+            <span>{tr("gui.quick.keyboard_hint")}</span>
           </div>
           {#each quickActions as action}
             <button role="menuitem" disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>
@@ -7561,10 +7576,10 @@
 
       {#if activePopover === "quickActions"}
         <div bind:this={quickActionPopover} class="quick-popover" role="menu" aria-label={tr("gui.quick.title")}
-          use:popupMenu={{ anchor: quickActionButton, onClose: closeQuickActions }}>
+          use:popupMenu={{ anchor: quickActionButton, onClose: closeQuickActions }} transition:popupPresence>
           <div class="quick-popover-head">
             <strong>{tr("gui.quick.title")}</strong>
-            <span>{tr("gui.quick.close_hint")}</span>
+            <span>{tr("gui.quick.keyboard_hint")}</span>
           </div>
           {#each quickActions as action}
             <button role="menuitem" disabled={navigationDisabled(action.screen)} title={navigationDisabledReason(action.screen)} onclick={() => chooseQuickAction(action.screen)}>

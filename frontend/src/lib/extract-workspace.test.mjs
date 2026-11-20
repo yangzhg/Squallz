@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestServer } from "../../tests/runtime.mjs";
 import { extractionFixture } from "../../tests/extraction.mjs";
+import { evaluateFunctions, readSvelteScript } from "../../tests/source.mjs";
 
 const server = await createTestServer();
 test.after(() => server.close());
@@ -118,6 +119,27 @@ test("both extract skins read one session and localized plan without exposing th
       assert.ok(body.includes(tFallback("gui.extract.plan_heading")));
       assert.ok(body.includes(tFallback("gui.selection.count_selected").replace("{count}", "1")));
       assert.doesNotMatch(body, /squallz-archive:|gui\.extract\.|style=/);
+      if (variant === "modern") {
+        const destinations = body.match(/<div class="destination-grid"[\s\S]*?<\/div>/u)?.[0];
+        assert.equal(destinations.match(/class="extract-destination-check"/gu)?.length, 4);
+        assert.equal(destinations.match(/aria-pressed="true"/gu)?.length, 1);
+      }
     }
+  }
+});
+
+test("retry from the keyboard keeps focus inside the plan when the button disappears", () => {
+  const source = readSvelteScript(new URL("../components/ExtractPlanSummary.svelte", import.meta.url), "ExtractPlanSummary.svelte");
+  const button = {};
+  const outside = {};
+  for (const activeElement of [button, outside]) {
+    const document = { activeElement };
+    const headingElement = { focus() { document.activeElement = this; } };
+    let focusedWhenLoading;
+    const { retry } = evaluateFunctions(source, ["retry"], {
+      document, headingElement, onRetry() { focusedWhenLoading = document.activeElement; },
+    });
+    retry({ currentTarget: button });
+    assert.equal(focusedWhenLoading, activeElement === button ? headingElement : outside);
   }
 });

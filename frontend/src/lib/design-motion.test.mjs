@@ -109,11 +109,20 @@ function motionRules(preference) {
 
 test("reduced-motion animation rules remain valid without vendor progress selectors", () => {
   const rules = motionRules("reduce");
-  for (const selector of [".task-modal-state.state-running", ".task-center-panel", ".app-icon"]) {
+  for (const selector of [".task-modal-state.state-running", ".task-center-surface", ".app-icon"]) {
     const rule = rules.find((candidate) => candidate.selectors.includes(selector));
     assert.equal(rule?.declarations.animation, "none", selector);
     assert.ok(rule.selectors.every((entry) => !/::-(?:webkit|moz)-/u.test(entry)),
       `${selector}: unsupported vendor selectors must not invalidate ordinary animation rules`);
+  }
+});
+
+test("task-center entry belongs to the frame shared by loading, list, and detail views", () => {
+  const frame = element("div", ["task-center-surface"], element("div", ["task-center-layout"]));
+  assert.match(motionStyle(frame, "no-preference").animation, /task-center-enter/u);
+  assert.equal(motionStyle(frame, "reduce").animation, "none");
+  for (const classes of [["task-center-panel"], ["task-center-detail"], ["task-center-panel", "task-surface-shell"]]) {
+    assert.equal(motionStyle(element("section", classes, frame), "no-preference").animation, undefined);
   }
 });
 
@@ -148,8 +157,21 @@ test("normal motion keeps the token-driven task status and progress effects", ()
   const status = rules.find((rule) => rule.selectors.includes(".task-modal-state.state-running"));
   assert.match(status?.declarations.animation ?? "", /task-running-pulse var\(--motion-status-pulse\)/u);
   for (const pseudo of ["::-webkit-progress-value", "::-moz-progress-bar"]) {
-    const fill = rules.find((rule) => rule.selectors.some((selector) => selector.endsWith(pseudo)));
+    const fill = rules.find((rule) => rule.selectors.includes(`.task-modal-card[data-task-active="true"] .task-modal-progress-block progress${pseudo}`));
     assert.match(fill?.declarations.animation ?? "", /progress-value-sheen var\(--motion-progress-sweep\)/u);
+  }
+});
+
+test("task fill widths interpolate only live, measured progress", () => {
+  for (const pseudo of ["::-webkit-progress-value", "::-moz-progress-bar"]) {
+    const taskTransitions = rules.filter(({ node }) => node.prelude.children.some((selector) => {
+      const text = css.slice(selector.start, selector.end);
+      return text.includes("task-modal-") && text.endsWith(pseudo);
+    }) && node.block.children.some((decl) => decl.property === "transition" && /^width\s/u.test(decl.value)));
+    assert.equal(taskTransitions.length, 1, pseudo);
+    const [{ node, media }] = taskTransitions;
+    assert.ok(media.includes("(prefers-reduced-motion: no-preference)"));
+    assert.match(css.slice(node.prelude.start, node.prelude.end), /\[data-task-active="true"\] progress\[value\]/u);
   }
 });
 
@@ -199,9 +221,45 @@ test("choice labels animate only paint and stop transitioning with reduced motio
   }
 });
 
+test("anchored and pointer menus fade without moving their measured bounds", () => {
+  for (const className of ["quick-popover", "entry-context-menu"]) {
+    const menu = element("div", [className]);
+    const normal = motionStyle(menu, "no-preference");
+    assert.match(normal.transition, /^opacity var\(--motion-duration-instant\)/u);
+    assert.equal(normal.transform, undefined);
+    assert.equal(motionStyle(menu, "reduce").transition, undefined);
+  }
+});
+
+test("disclosure and review content fade while controls keep their native focus and geometry", () => {
+  for (const variant of ["modern-create", "classic-create"]) {
+    const page = element("div", [variant]);
+    const details = element("details", ["workspace-summary-disclosure"], page, [], { open: "" });
+    const review = element("section", ["create-plan-review"], page);
+    const content = element("section", ["create-setup-summary"], details);
+    for (const target of [content, element("div", ["create-plan-review-copy"], review), element("div", ["archive-preset-manager"], page)]) {
+      assert.match(motionStyle(target, "no-preference").animation, /^content-fade var\(--motion-duration-fast\)/u);
+      assert.equal(motionStyle(target, "reduce").animation, undefined);
+    }
+    for (const target of [element("summary", [], details), element("div", ["create-plan-review-actions"], review)]) {
+      assert.equal(motionStyle(target, "no-preference").animation, undefined);
+    }
+    delete details.attributes.open;
+    assert.equal(motionStyle(content, "no-preference").animation, undefined);
+  }
+  const check = element("svg", ["extract-destination-check"]);
+  assert.match(motionStyle(check, "no-preference").transition, /^opacity var\(--motion-duration-fast\)/u);
+  assert.equal(motionStyle(check, "reduce").transition, undefined);
+});
+
 test("page content fades without transforming ancestors or the sticky action bar", () => {
   const root = element("div", ["design-root"]);
   const containers = [
+    ["modern-content", "recent-workspace"],
+    ["archive-workspace", "archive-start-state"],
+    ["modern-convert", "sheet-head"],
+    ["modern-extract", "sheet-head"],
+    ["appearance-view", "sheet-head"],
     ["modern-create", "create-source-list"],
     ["modern-create", "create-workflow"],
     ["modern-convert", "create-workflow"],

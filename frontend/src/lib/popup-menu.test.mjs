@@ -3,9 +3,9 @@ import test from "node:test";
 import { createTestServer } from "../../tests/runtime.mjs";
 
 const server = await createTestServer();
-let popupMenu, popupMenuPosition;
+let popupMenu, popupMenuPosition, popupPresence;
 try {
-  ({ popupMenu, popupMenuPosition } = await server.ssrLoadModule("/src/lib/popup-menu.ts"));
+  ({ popupMenu, popupMenuPosition, popupPresence } = await server.ssrLoadModule("/src/lib/popup-menu.ts"));
 } finally {
   await server.close();
 }
@@ -182,6 +182,32 @@ test("focus moving outside closes the menu without restoring or overriding its n
   fixture.key("Escape");
   assert.deepEqual(fixture.closed, [false], "one dismissal per menu lifetime");
   fixture.action.destroy();
+});
+
+test("a reversing menu outro resumes keyboard ownership without disturbing a new focus destination", async () => {
+  const fixture = menuFixture();
+  await Promise.resolve(); await Promise.resolve();
+  fixture.key("Escape");
+  fixture.node.inert = true;
+  fixture.next.focus();
+  fixture.nodeListeners.get("introstart")();
+  assert.equal(fixture.document.activeElement, fixture.next);
+  assert.deepEqual(fixture.closed, [true]);
+  fixture.node.inert = false;
+  fixture.nodeListeners.get("introstart")();
+  assert.equal(fixture.document.activeElement, fixture.first);
+  fixture.key("ArrowDown");
+  assert.equal(fixture.document.activeElement, fixture.second);
+  fixture.key("Escape");
+  assert.deepEqual(fixture.closed, [true, true]);
+  fixture.action.destroy();
+});
+
+test("menu retention follows the CSS transition duration including instant dismissal", () => {
+  for (const [transitionDuration, expected] of [["0.09s", 90], ["0s", 0]]) {
+    const defaultView = { getComputedStyle: () => ({ transitionDuration }) };
+    assert.equal(popupPresence({ ownerDocument: { defaultView } }).duration, expected);
+  }
 });
 
 test("an unavailable menu keeps a keyboard exit and cannot navigate the row underneath", async () => {

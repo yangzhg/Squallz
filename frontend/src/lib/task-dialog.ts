@@ -1190,7 +1190,7 @@ export function taskNextStepDetail(task: TaskDialogModel, taskWindowMode: boolea
         ? tr("gui.task.next_step_test_failed_window")
         : tr("gui.task.next_step_test_failed");
     }
-    return tr("gui.task.next_step_window_results");
+    return taskWindowMode ? tr("gui.task.next_step_window_results") : "";
   }
   if (task.spec.kind === "batch_extract") {
     const outcome = readBatchExtractResult(task.result);
@@ -1303,5 +1303,5 @@ export function taskNextStepDetail(task: TaskDialogModel, taskWindowMode: boolea
       ? tr("gui.task.next_step_window_results")
       : tr("gui.task.next_step_results");
   }
-  return tr("gui.task.next_step_done");
+  return taskWindowMode ? tr("gui.task.next_step_done") : "";
 }

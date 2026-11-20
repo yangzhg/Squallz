@@ -50,11 +50,6 @@
     };
     setupSummary: ComponentProps<CreateSetupSummaryComponent>;
     preset: ComponentProps<ArchivePresetPickerComponent>;
-    advanced: {
-      open: boolean;
-      onToggle: (open: boolean) => void;
-      onKeydown: (event: KeyboardEvent) => void;
-    };
     output: ComponentProps<CreateOutputOptionsComponent>;
     content: ComponentProps<CreateContentPolicyOptionsComponent>;
     recovery: {
@@ -242,12 +237,8 @@
 
         <CreateOutputOptions {...surface.output} showOutputPreview={session.sources.length === 0} />
 
-        <details
-          class="create-advanced-disclosure"
-          open={surface.advanced.open}
-          ontoggle={(event) => surface.advanced.onToggle(event.currentTarget.open)}
-        >
-          <summary onkeydown={surface.advanced.onKeydown}>
+        <details class="create-advanced-disclosure" bind:open={session.advancedOpen}>
+          <summary>
             <strong>{surface.tr("gui.create.advanced.title")}</strong>
             <small>{surface.tr("gui.create.advanced.detail")}</small>
             <Icon name="chevron-down" size={16} class="create-advanced-chevron" />
