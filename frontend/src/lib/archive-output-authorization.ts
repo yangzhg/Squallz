@@ -1,3 +1,4 @@
+import { interpolate } from "./i18n.svelte";
 import { isErrorDto, type CreateDestinationInspectionDto, type ErrorDto } from "./ipc";
 
 export class DestinationInspectionError extends Error {
@@ -56,7 +57,7 @@ export async function authorizeArchiveOutput(
       ? "gui.output.replace_existing"
       : options.message;
     const replace = await confirm(
-      options.tr(`${options.message}.body`).replace("{path}", options.path),
+      interpolate(options.tr(`${options.message}.body`), { path: options.path }),
       {
         title: options.tr(`${options.message}.title`),
         kind: "warning",

@@ -133,6 +133,26 @@ test("authorization ignores late inspection, dialog loading and approval without
   }
 });
 
+test("overwrite confirmation displays the exact destination authorized for creation and conversion", async () => {
+  const { loadLocale, tFallback } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+  const dest = "/output/报价 $& 和 $' {path}.zip";
+  const spec = { dest, replace_existing: false, replacement_guard: null };
+  for (const locale of ["en-US", "zh-CN"]) {
+    await loadLocale(locale);
+    for (const message of ["gui.create.replace_existing", "gui.output.replace_existing",
+      "gui.output.replace_existing_split", "gui.create.replace_changed", "gui.convert.replace_changed"]) {
+      let prompt;
+      const authorized = await refreshArchiveOutputAuthorization(spec, authorizationOptions({
+        path: dest, message, tr: tFallback,
+        confirm: async () => async (body) => { prompt = body; return true; },
+      }));
+      const [before, after] = tFallback(`${message}.body`).split("{path}");
+      assert.equal(prompt, before + dest + after);
+      assert.deepEqual(authorized, { dest, replace_existing: true, replacement_guard: "new" });
+    }
+  }
+});
+
 test("split replacement retains its body and title with the existing action labels", async () => {
   let dialog;
   await authorizeArchiveOutput(authorizationOptions({ message: "gui.output.replace_existing_split",

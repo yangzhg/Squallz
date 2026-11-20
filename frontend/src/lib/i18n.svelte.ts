@@ -107,8 +107,8 @@ export function i18nReady(): boolean {
   return store.ready;
 }
 
-/** Translates a key, substituting `{name}` placeholders. */
-function interpolate(template: string, params?: Parameters): string {
+/** Substitutes named placeholders with literal values in a localized template. */
+export function interpolate(template: string, params?: Parameters): string {
   if (!params) return template;
   return template.replace(/\{([^{}]+)\}/g, (placeholder, name: string) =>
     Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : placeholder,

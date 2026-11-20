@@ -170,8 +170,7 @@
     const key = last
       ? "gui.task_center.last_item"
       : "gui.task_center.current_item";
-    return tr(key)
-      .replace("{name}", pathBaseName(task.current) || task.current);
+    return tr(key, { name: pathBaseName(task.current) || task.current });
   }
 
   function taskControlsBusy(task: Task): boolean {
@@ -407,7 +406,7 @@
         <header>
           <div>
             <button class="task-center-title task-center-open" type="button" data-task-details-id={task.id}
-              aria-label={tr("gui.task_center.open_details").replace("{name}", taskTitle)}
+              aria-label={tr("gui.task_center.open_details", { name: taskTitle })}
               onclick={(event) => openDetails(task, index, event.currentTarget)}>
               <span>{taskTitle}</span><Icon name="chevron-right" size={14} />
             </button>
@@ -432,7 +431,7 @@
             class="task-center-progress"
             value={taskProgressPercent(task)}
             max="100"
-            aria-label={tr("gui.task_center.progress_for").replace("{name}", taskTitle)}
+            aria-label={tr("gui.task_center.progress_for", { name: taskTitle })}
           ></progress>
         {/if}
 
@@ -453,7 +452,7 @@
         <div
           class="task-center-actions"
           role="group"
-          aria-label={tr("gui.task_center.actions_for").replace("{name}", taskTitleLabel(task))}
+          aria-label={tr("gui.task_center.actions_for", { name: taskTitle })}
         >
           {#if (task.state === "running" && task.interruptible && task.pausable) || task.state === "paused"}
             {@const paused = task.state === "paused"}
@@ -469,7 +468,7 @@
             <div
               class="task-center-reorder"
               role="group"
-              aria-label={tr("gui.task_center.reorder_for").replace("{name}", taskTitleLabel(task))}
+              aria-label={tr("gui.task_center.reorder_for", { name: taskTitle })}
             >
               <span
                 class="task-center-drag-handle"

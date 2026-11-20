@@ -373,7 +373,7 @@
         <header class="task-question-head">
           <span class="task-question-icon"><Icon name="lock" size={18} /></span>
           <div>
-            <strong>{tr("gui.password.unlock_name").replace("{name}", passwordQuestion.name)}</strong>
+            <strong>{tr("gui.password.unlock_name", { name: passwordQuestion.name })}</strong>
             <span>{passwordQuestion.detail}</span>
           </div>
         </header>

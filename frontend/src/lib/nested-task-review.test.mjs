@@ -14,7 +14,7 @@ test.afterEach(() => fixture.dispose());
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function spec() {
-  return { kind: "extract_nested", outer_path: "squallz-archive://7", entry_path: "Previous versions/完整内层归档.7z",
+  return { kind: "extract_nested", outer_path: "squallz-archive://7", entry_path: "Previous versions/完整$&内层归档.7z",
     dest: "/output/original", overwrite: "rename", symlinks: "skip", smart: false,
     encoding: "gbk", password: "old-secret", best_effort: true };
 }
@@ -56,7 +56,7 @@ test(`${state} inner extraction restores the exact source and nonsecret settings
   assert.equal(run.context.screen, "nestedExtract");
   assert.equal(run.calls.some(([name]) => name === "submit"), false);
   const draft = run.session.nested;
-  assert.equal(`${draft.outerDisplayPath} › ${draft.entry_path}`, "/Archives/外层归档.zip › Previous versions/完整内层归档.7z");
+  assert.equal(`${draft.outerDisplayPath} › ${draft.entry_path}`, "/Archives/外层归档.zip › Previous versions/完整$&内层归档.7z");
   assert.equal(draft.encoding, "gbk");
   assert.equal(draft.best_effort, true);
   assert.equal(draft.overwrite, "rename");
@@ -67,6 +67,7 @@ test(`${state} inner extraction restores the exact source and nonsecret settings
   run.session.editNested({ best_effort: false });
   await run.session.start("nested");
   const submitted = run.calls.find(([name]) => name === "submit")[1];
+  assert.ok(run.calls.some(([name, message]) => name === "notice" && message.endsWith("完整$&内层归档.7z")));
   assert.deepEqual(submitted, { ...spec(), dest: "/edited/交付", overwrite: "ask", symlinks: "preserve",
     smart: true, best_effort: false, password: null });
   assert.equal("password" in run.session.nested, false);
@@ -177,7 +178,9 @@ test("shared review layout presents the inner source, outer encoding and real op
     await loadLocale(locale); run.context.tr = tFallback;
     for (const variant of ["modern", "classic"]) {
       const { body } = render(ToolsWorkspace, { props: { surface: run.surface(variant) } });
-      assert.ok(body.includes("/Archives/外层归档.zip › Previous versions/完整内层归档.7z"));
+      const labels = body.replaceAll("&amp;", "&");
+      assert.ok(labels.includes("/Archives/外层归档.zip › Previous versions/完整$&内层归档.7z"));
+      assert.ok(labels.includes(`aria-label="${tFallback("gui.batch.browse_destination_for", { name: "完整$&内层归档.7z" })}"`));
       assert.ok(body.includes(tFallback("gui.nested_extract.outer_encoding").replace("{encoding}", "gbk")));
       assert.ok(body.includes(tFallback("gui.nested_extract.execution_hint")));
       assert.doesNotMatch(body, /old-secret|squallz-archive:|gui\.nested_extract\.|batch-remove-0/);

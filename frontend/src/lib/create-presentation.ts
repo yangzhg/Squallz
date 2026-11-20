@@ -106,9 +106,9 @@ export class CreatePresentation {
     if (this.session.options.state.destinationBase === "ask") {
       const suggested = this.session.suggestedOutputPath(this.session.options.state.format, this.session.options.outputExtension(this.session.capability.extension));
       if (suggested) {
-        return tr("gui.create.output.preview_confirm").replace("{path}", suggested);
+        return tr("gui.create.output.preview_confirm", { path: suggested });
       }
-      return tr("gui.create.output.preview_ask").replace("{name}", name);
+      return tr("gui.create.output.preview_ask", { name });
     }
     if (this.session.options.state.destinationBase === "default_directory") {
       const folder = this.session.port.read().defaultDirectory;
@@ -119,7 +119,7 @@ export class CreatePresentation {
     const droppedParent = commonCreateSourceParent(this.session.inputs, this.session.port.platform());
     return droppedParent
       ? this.session.joinFolder(droppedParent, name)
-      : tr("gui.create.output.preview_source_parent").replace("{name}", name);
+      : tr("gui.create.output.preview_source_parent", { name });
   };
 
   formatDisabledReason = (formatId: CreateFormatId): string => {
@@ -320,16 +320,15 @@ export class CreatePresentation {
 
   preflightCurrentDetail = (): string => {
     if (this.session.preflight.state.phase !== "measuring" || !this.session.preflight.state.current) return "";
-    return tr("gui.create.scanning_current_item").replace("{path}", this.session.preflight.state.current);
+    return tr("gui.create.scanning_current_item", { path: this.session.preflight.state.current });
   };
 
   destinationPreflightDetail = (): string => {
     if (this.session.preflight.state.requestKind === "destination" && this.session.preflight.state.current) {
-      return tr("gui.create.destination_check_current")
-        .replace("{path}", this.session.preflight.state.current);
+      return tr("gui.create.destination_check_current", { path: this.session.preflight.state.current });
     }
     return this.session.preflight.state.destination
-      ? tr("gui.create.destination_path_checked").replace("{path}", this.session.preflight.state.destination)
+      ? tr("gui.create.destination_path_checked", { path: this.session.preflight.state.destination })
       : "";
   };
 

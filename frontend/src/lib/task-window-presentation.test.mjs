@@ -81,6 +81,39 @@ function extractTask(state) {
   };
 }
 
+test("task rows and password prompts preserve literal archive and member names", async () => {
+  const server = await createTestServer();
+  try {
+    const { render } = await server.ssrLoadModule("svelte/server");
+    const { default: TaskCenter } = await server.ssrLoadModule("/src/components/TaskCenter.svelte");
+    const { default: TaskProgressDialog } = await server.ssrLoadModule("/src/components/TaskProgressDialog.svelte");
+    const { loadLocale, t } = await server.ssrLoadModule("/src/lib/i18n.svelte.ts");
+    const { surface } = await taskSurface("dialog", server);
+    const archive = "reports-$&-$'-{name}.zip";
+    const member = "notes-$&-$'-{name}.txt";
+    const task = { ...extractTask("running"), spec: { kind: "extract", path: `/Archives/${archive}`, dest: "/Exports" },
+      current: `folder/${member}`, queueMoveIntent: null };
+    const tasks = [task, { ...task, id: 43, state: "cancelled" },
+      { ...task, id: 44, state: "queued", queuePosition: 1 }, { ...task, id: 45, state: "queued", queuePosition: 2 }];
+    for (const locale of ["en-US", "zh-CN"]) {
+      await loadLocale(locale);
+      const title = t("gui.task.job.extract", { name: archive });
+      const rows = render(TaskCenter, { props: { tasks, rootClass: "task-center" } }).body.replaceAll("&amp;", "&");
+      for (const key of ["open_details", "progress_for", "actions_for", "reorder_for"]) {
+        assert.ok(rows.includes(`aria-label="${t(`gui.task_center.${key}`, { name: title })}"`), key);
+      }
+      for (const key of ["current_item", "last_item"]) {
+        assert.ok(rows.includes(t(`gui.task_center.${key}`, { name: member })), key);
+      }
+      const prompt = render(TaskProgressDialog, { props: { ...surface, task,
+        passwordQuestion: { name: archive, detail: "", sessionDetail: "" } } }).body.replaceAll("&amp;", "&");
+      assert.ok(prompt.includes(t("gui.password.unlock_name", { name: archive })));
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("waiting task surfaces retain measured progress without rates or processing animation", async () => {
   const server = await createTestServer();
   try {

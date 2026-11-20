@@ -171,7 +171,7 @@ export class ExtractReviewSession {
           detail: tr("gui.batch.archive_count").replace("{count}", count),
         });
       } else {
-        if (isCurrent()) this.port.notice(tr("gui.preview.extract_nested_queued").replace("{name}", basename(spec.entry_path)));
+        if (isCurrent()) this.port.notice(tr("gui.preview.extract_nested_queued", { name: basename(spec.entry_path) }));
         recordOperation({
           status: "queued",
           title: tr("gui.preview.nested_extract_queued_operation_title"),

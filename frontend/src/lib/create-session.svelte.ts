@@ -376,10 +376,7 @@ export class CreateSession {
 
   removeSource = (path: string): void => {
     if (this.removeSources([path]) === 0) return;
-    this.port.notice(
-      tr("gui.create.sources.removed_one")
-        .replace("{name}", desktopBasename(path, this.port.platform())),
-    );
+    this.port.notice(tr("gui.create.sources.removed_one", { name: desktopBasename(path, this.port.platform()) }));
   };
 
   removeSelected = (): void => {
@@ -527,9 +524,11 @@ export class CreateSession {
           status: "queued",
           title: pending.creatingSfx ? tr("gui.create.sfx_queued")
             : pending.source === "drop" ? tr("gui.create.dropped_items_queued") : tr("gui.create.queued"),
-          detail: tr("gui.create.operation_detail")
-            .replace("{name}", desktopBasename(plan.primary_output, this.port.platform()))
-            .replace("{profile}", this.view.profileLabel(pending.profile)).replace("{size}", formatBytes(plan.total_bytes)),
+          detail: tr("gui.create.operation_detail", {
+            name: desktopBasename(plan.primary_output, this.port.platform()),
+            profile: this.view.profileLabel(pending.profile),
+            size: formatBytes(plan.total_bytes),
+          }),
         });
       }
     }

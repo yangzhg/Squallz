@@ -529,6 +529,38 @@ function preparationState(run) {
   };
 }
 
+test("creation preserves literal file names in previews, preflight, queue history and source removal", async () => {
+  const { operationHistory } = await server.ssrLoadModule("/src/lib/history.svelte.ts");
+  const { run, blocked, reached } = await creationPreparation({ stop: "plan" });
+  const name = "Report $& $' {profile} {size}.zip";
+  const input = `/source/${name}`;
+  const dest = `/output/${name}`;
+  run.create.restoreTask(taskSpec({ inputs: [input], dest, split_size: null }));
+  assert.equal(run.create.view.outputPreview(), `Confirm location when starting · ${dest}`);
+
+  let checkedPath;
+  run.context.ipc.inspectCreateDestination = async (path, _split, requestId) => {
+    run.create.preflight.applyEvent({ request_id: requestId, phase: "destination", current: path });
+    checkedPath = run.create.view.destinationPreflightDetail();
+    return { conflict: false, guard: null };
+  };
+  const preparing = run.create.start([input], "dialog");
+  await waitFor(reached, "source scan");
+  assert.equal(checkedPath, `Current · ${dest}`);
+  run.create.preflight.applyEvent({ request_id: run.create.preflight.state.requestId, phase: "source", current: input });
+  assert.equal(run.create.view.preflightCurrentDetail(), `Current · ${input}`);
+  blocked.resolve(blocked.value);
+  await preparing;
+  assert.equal(run.create.view.destinationPreflightDetail(), `Destination · ${dest}`);
+  await run.create.confirm();
+  assert.equal(operationHistory()[0].detail, `${name} · Custom · 512 B input`);
+
+  run.create.appendSources([input], "file");
+  assert.equal(run.create.view.outputPreview(), `Choose location when starting · ${name}`);
+  run.create.removeSource(input);
+  assert.equal(run.calls.findLast(([kind]) => kind === "notice")[1], `${name} removed from the source list`);
+});
+
 test("creation rejects inconsistent destination guards before confirmation or planning", async () => {
   for (const inspection of [{ conflict: false, guard: "unexpected" }, { conflict: true, guard: null }]) {
     const { run } = await creationPreparation();

@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import { parse } from "svelte/compiler";
+import { createTestServer } from "../../tests/runtime.mjs";
 import { compileTestScript, readSvelteScript, selectFunctions, selectMountCallbacks } from "../../tests/source.mjs";
 
 const appUrl = new URL("../App.svelte", import.meta.url);
@@ -168,12 +169,10 @@ test("native dialog failure releases its blocker and other modal forms defer que
   assert.equal(run.context.taskDialogTaskId, 21);
 });
 
-test("shared overwrite confirmation keeps task questions deferred across creation, conversion and late conflicts", async () => {
-  const source = ts.createSourceFile("archive-output-authorization.ts",
-    readFileSync(new URL("./archive-output-authorization.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
-  const [declaration] = selectFunctions(source, ["authorizeArchiveOutput"]);
-  const authorize = vm.runInNewContext(compileTestScript(declaration.getText(source))
-    + "\nauthorizeArchiveOutput", { exports: {} });
+test("shared overwrite confirmation keeps task questions deferred across creation, conversion and late conflicts", async (context) => {
+  const server = await createTestServer();
+  context.after(() => server.close());
+  const { authorizeArchiveOutput } = await server.ssrLoadModule("/src/lib/archive-output-authorization.ts");
   for (const message of ["gui.create.replace_existing", "gui.output.replace_existing", "gui.create.replace_changed", "gui.convert.replace_changed"]) {
     for (const outcome of ["approved", "cancelled", "failed"]) {
       let finish;
@@ -193,7 +192,7 @@ test("shared overwrite confirmation keeps task questions deferred across creatio
       assert.equal(await run.api.getDialogModule(), dialogs, "all consumers share one wrapped module");
       assert.equal(dialogs.open, original.open);
       assert.equal(dialogs.save, original.save);
-      const authorization = authorize({
+      const authorization = authorizeArchiveOutput({
         path: "/output/archive.zip", inspect: async () => ({ conflict: true, guard: "observed-output" }),
         isCurrent: () => true, confirm: async () => dialogs.confirm, tr: (key) => key, message,
       });

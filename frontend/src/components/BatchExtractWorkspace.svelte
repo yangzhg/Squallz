@@ -3,6 +3,7 @@
   import type { BatchWorkspaceSurface } from "./ToolsWorkspace.svelte";
   import type { OverwritePolicy, SymlinkPolicy } from "../lib/ipc";
   import { basename } from "../lib/format";
+  import { interpolate } from "../lib/i18n.svelte";
   import { extractOverwriteLabel, extractSymlinkLabel } from "../lib/archive-option-labels";
   import type { BatchExtractEdit } from "../lib/batch-extract.svelte";
   import ArchiveReturnStrip from "./ArchiveReturnStrip.svelte";
@@ -95,10 +96,11 @@
       : surface.tr("gui.batch.direct_destination_hint")}</p>
     <ol class="operation-list">
       {#each rows as row, index (`${index}:${row.path}`)}
+        {@const name = itemName(row.displayPath)}
         <li class="operation-card">
           <div class="operation-card-header">
             <div class="operation-identity">
-              <strong>{itemName(row.displayPath)}</strong>
+              <strong>{name}</strong>
               <span>{surface.format(surface.mode === "nested" && nested ? nested.entry_path : row.displayPath)} · {(surface.mode === "nested"
                 ? surface.tr("gui.nested_extract.outer_encoding")
                 : surface.tr("gui.batch.encoding")).replace("{encoding}", row.encoding ?? surface.tr("gui.extract.encoding.auto"))}</span>
@@ -106,7 +108,7 @@
             </div>
             {#if surface.mode === "batch"}
               <button class="secondary-lite" id={`batch-remove-${index}`} disabled={locked}
-                aria-label={surface.tr("gui.batch.remove_archive").replace("{name}", itemName(row.displayPath))} onclick={() => surface.onRemove(index)}>
+                aria-label={interpolate(surface.tr("gui.batch.remove_archive"), { name })} onclick={() => surface.onRemove(index)}>
                 <Icon name="x" size={16} />{surface.tr("gui.batch.remove")}
               </button>
             {/if}
@@ -117,11 +119,11 @@
           </label>
           <div class="operation-control">
             <input class="operation-input" id={`batch-destination-${index}`} value={row.dest}
-              aria-label={surface.tr("gui.batch.destination_for").replace("{name}", itemName(row.displayPath))}
+              aria-label={interpolate(surface.tr("gui.batch.destination_for"), { name })}
               aria-describedby="batch-destination-hint" disabled={locked}
               oninput={(event) => edit({ kind: "destination", index, value: event.currentTarget.value })} />
             <button class="secondary-lite" disabled={locked} onclick={() => void surface.session.choose(surface.mode, index)}
-              aria-label={surface.tr("gui.batch.browse_destination_for").replace("{name}", itemName(row.displayPath))}>
+              aria-label={interpolate(surface.tr("gui.batch.browse_destination_for"), { name })}>
               <Icon name="folder" size={16} />{surface.tr("gui.compress.browse")}
             </button>
           </div>

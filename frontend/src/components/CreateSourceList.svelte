@@ -146,14 +146,14 @@
       {#each session.sources as row (row.path)}
         {@const name = desktopBasename(row.path, session.port.platform())}
         {@const selected = session.isSelected(row.path)}
-        {@const removeLabel = tr("gui.create.sources.remove_item").replace("{name}", name)}
+        {@const removeLabel = tr("gui.create.sources.remove_item", { name })}
         <div class:selected={selected} class="create-source-row" role="listitem" title={row.path}>
           <label>
             <input
               type="checkbox"
               checked={selected}
               disabled={Boolean(lockedReason)}
-              aria-label={tr("gui.create.sources.select_item").replace("{name}", name)}
+              aria-label={tr("gui.create.sources.select_item", { name })}
               onchange={() => session.toggleSelection(row.path)}
             />
             <span class="create-source-kind" role="img" aria-label={session.view.sourceKindLabel(row.kind)}>
