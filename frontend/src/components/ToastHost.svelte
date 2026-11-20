@@ -4,13 +4,11 @@
   import { cssVariables, type CssVariableMap } from "../lib/css-variables";
   import { tFallback } from "../lib/i18n.svelte";
   import {
-    pushToast,
     dismissToast,
-    removeToast,
+    runToastAction,
     setToastReading,
     setToastsBlocked,
     toasts,
-    type Toast,
     type ToastKind,
   } from "../lib/toasts.svelte";
 
@@ -24,14 +22,13 @@
     blocked?: boolean;
   } = $props();
 
-  let runningActionIds = $state<number[]>([]);
   let host = $state<HTMLElement | null>(null);
   let leadingToastId: number | undefined;
 
   $effect.pre(() => {
     const nextBlocked = blocked;
     untrack(() => setToastsBlocked(nextBlocked));
-    return () => setToastsBlocked(false);
+    return () => setToastsBlocked(true);
   });
 
   $effect(() => {
@@ -69,22 +66,6 @@
     sync();
     return { destroy() { controller.abort(); setToastReading(id, false); } };
   }
-
-  async function runToastAction(toast: Toast): Promise<void> {
-    if (!toast.action || runningActionIds.includes(toast.id)) return;
-    runningActionIds = [...runningActionIds, toast.id];
-    try {
-      const completed = await toast.action.run();
-      if (completed !== false) removeToast(toast.id);
-    } catch {
-      pushToast({
-        kind: "warning",
-        title: tFallback("gui.toast.action_failed"),
-      });
-    } finally {
-      runningActionIds = runningActionIds.filter((id) => id !== toast.id);
-    }
-  }
 </script>
 
 {#if !blocked && toasts().length > 0}
@@ -110,9 +91,9 @@
             <button
               class="toast-action"
               type="button"
-              disabled={runningActionIds.includes(toast.id)}
-              aria-busy={runningActionIds.includes(toast.id)}
-              onclick={() => void runToastAction(toast)}
+              disabled={toast.actionPending}
+              aria-busy={toast.actionPending ?? false}
+              onclick={() => void runToastAction(toast.id)}
             >
               {toast.action.label}
             </button>

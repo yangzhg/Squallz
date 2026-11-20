@@ -1,6 +1,6 @@
-// Toast store: max 3 on screen, ordered by urgency; overflow queues. Actionable toasts and danger
-// stay until dismissed; other info/success toasts last 4 s and warnings 6 s.
+import { tFallback } from "./i18n.svelte";
 
+// Show up to three notifications, with higher urgency first and overflow queued.
 export type ToastKind = "info" | "success" | "warning" | "danger";
 
 export interface Toast {
@@ -16,8 +16,9 @@ export interface Toast {
     /** Return false when the action could not complete and the toast should stay visible. */
     run: () => boolean | void | Promise<boolean | void>;
   };
-  /** Keep visible until the user dismisses it or its keyed condition clears. */
+  /** Actionable notifications persist by default. Set false for an optional shortcut. */
   persistent?: boolean;
+  actionPending?: boolean;
   /** Log-only detail for the details view */
   detail?: string;
 }
@@ -69,7 +70,7 @@ export function setToastReading(id: number, active: boolean): void {
   }
 }
 
-export function pushToast(toast: Omit<Toast, "id">): void {
+export function pushToast(toast: Omit<Toast, "id" | "actionPending">): void {
   if (toast.key) removeToastByKey(toast.key);
   const full: Toast = { ...toast, id: nextId++ };
   if (store.visible.length >= 3) {
@@ -128,7 +129,8 @@ function show(toast: Toast): void {
 }
 
 function startToastTimer(toast: Toast): void {
-  const duration = toast.action || toast.persistent ? 0 : DURATION[toast.kind];
+  const persistent = toast.persistent ?? Boolean(toast.action);
+  const duration = persistent ? 0 : DURATION[toast.kind];
   if (duration === 0 || presentationBlocked || reading.has(toast.id)) return;
   let timer = timers.get(toast.id);
   if (!timer) {
@@ -166,6 +168,23 @@ export function dismissToast(id: number): void {
   store.visible.splice(i, 1);
   const next = store.queue.shift();
   if (next) show(next);
+}
+
+export async function runToastAction(id: number): Promise<void> {
+  const toast = store.visible.find((entry) => entry.id === id);
+  if (!toast?.action || toast.actionPending) return;
+  toast.actionPending = true;
+  // Once chosen, keep the shortcut available for retry if the action fails.
+  toast.persistent = true;
+  pauseToastTimer(id);
+  try {
+    const completed = await toast.action.run();
+    if (completed !== false) removeToast(id);
+  } catch {
+    pushToast({ kind: "warning", title: tFallback("gui.toast.action_failed") });
+  } finally {
+    toast.actionPending = false;
+  }
 }
 
 /** Removes a completed action even if a higher-priority toast displaced it into the queue. */

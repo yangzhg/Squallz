@@ -60,6 +60,40 @@ const createSpec = {
   post_success: "trash_source", test_after_create: false,
 };
 
+const extractSpec = { kind: "extract", path: "/input/report.zip", dest: "/output", password: null,
+  expected_destination: null, expected_input_guard: null, selection: null, overwrite: "ask",
+  symlinks: "skip", smart: false, encoding: null, verify_sfx: true, best_effort: false };
+
+test("clean extraction shortcuts expire while task outputs and recovery notices remain available", (context) =>
+  withJobEvents(async ({ server, jobs, ipc, notices }) => {
+    const { taskOutputPath } = await server.ssrLoadModule("/src/lib/task-dialog.ts");
+    const { operationHistory } = await server.ssrLoadModule("/src/lib/history.svelte.ts");
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const repairSpec = { kind: "repair_zip", src: "/input/broken.zip", dest: "/repaired.zip", level: 6 };
+      for (const [id, taskSpec, result] of [
+        [70, extractSpec, jobResult("extract")],
+        [71, extractSpec, jobResult("extract", { counts: { skipped: 1 } })],
+        [72, repairSpec, jobResult("repair_zip")],
+      ]) {
+        ipc.submitJob = async () => ({ ...snapshot(id, 1, "done"), spec: taskSpec, result });
+        await jobs.submitJob(taskSpec);
+      }
+      context.mock.timers.tick(3999);
+      const shortcut = notices.toasts().find((toast) => toast.key === "task:70:result");
+      assert.ok(shortcut?.action);
+      context.mock.timers.tick(1);
+      context.mock.timers.tick(60_000);
+      assert.deepEqual(notices.toasts().map((toast) => toast.key), ["task:71:result", "task:72:result"]);
+      const extracted = jobs.tasks().find((task) => task.id === 70);
+      assert.equal(extracted.state, "done");
+      assert.equal(taskOutputPath(extracted), "/output");
+      assert.equal(operationHistory().length, 3);
+    } finally {
+      context.mock.timers.reset();
+    }
+  }));
+
 test("presented task results suppress duplicate notices while completion, recovery and history still run", () =>
   withJobEvents(async ({ server, jobs, ipc, notices, publish, nativeCalls }) => {
     const { operationHistory } = await server.ssrLoadModule("/src/lib/history.svelte.ts");
@@ -92,9 +126,6 @@ test("presented task results suppress duplicate notices while completion, recove
     await publish(snapshot(72, 2, "cancelled"));
     assert.equal(notices.toasts().length, 0);
 
-    const extractSpec = { kind: "extract", path: "/input/report.zip", dest: "/output", password: null,
-      expected_destination: null, expected_input_guard: null, selection: null, overwrite: "ask",
-      symlinks: "skip", smart: false, encoding: null, verify_sfx: true, best_effort: false };
     ipc.submitJob = async () => ({ ...snapshot(73, 1), spec: extractSpec });
     await jobs.submitJob(extractSpec);
     jobs.setPresentedTaskId(73);

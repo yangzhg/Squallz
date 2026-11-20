@@ -29,6 +29,7 @@ import { t, tFallback } from "./i18n.svelte";
 import { jobTitleFor } from "./job-title";
 import { pushToast, removeToastByKey, type Toast } from "./toasts.svelte";
 import { taskResultPresentation } from "./task-outcome";
+import { taskResultScreen } from "./task-model";
 import { readCreateResult } from "./create-result";
 import { openCreatedOutputWithFallback } from "./create-completion";
 import { recordOperation } from "./history.svelte";
@@ -392,6 +393,7 @@ function finishToast(task: Task): void {
     kind: outcome.toastKind,
     title: outcome.summary,
     body: outcome.body,
+    persistent: outcome.toastKind === "success" && taskResultScreen(task) !== "recovery" ? false : undefined,
     action: output
       ? { label: t("gui.task.show_in_file_manager", { fileManager: platformFileManagerName() }), run: () => revealPath(output) }
       : undefined,

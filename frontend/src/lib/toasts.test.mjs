@@ -249,7 +249,7 @@ test("priority preemption and keyed removal preserve blocked queues and visible-
 
 test("hover and focus pause one toast until both end, including moves between its controls", (context) =>
   withToastClock(context, ({ pushToast, toasts, setToastReading, setToastsBlocked, advance }) => {
-    pushToast({ kind: "info", title: "reading" });
+    pushToast({ kind: "success", title: "reading", persistent: false, action: { label: "Show", run() {} } });
     pushToast({ kind: "success", title: "neighbor" });
     advance(1000);
     const id = toasts()[0].id;
@@ -280,6 +280,64 @@ test("hover and focus pause one toast until both end, including moves between it
     assert.equal(toasts().length, 1);
     advance(1);
     assert.equal(toasts().length, 0);
+  }));
+
+test("a chosen shortcut survives hidden controls and retries after failure", (context) =>
+  withToastClock(context, async ({ pushToast, runToastAction, toasts, setToastReading, setToastsBlocked, advance }) => {
+    let respond;
+    let attempts = 0;
+    const run = () => {
+      attempts++;
+      return new Promise((resolve, reject) => { respond = { resolve, reject }; });
+    };
+    pushToast({ kind: "success", persistent: false, title: "Finished", action: { label: "Show", run } });
+    advance(3999);
+    const { id } = toasts()[0];
+    const first = runToastAction(id);
+    setToastReading(id, true);
+    setToastsBlocked(true);
+    setToastReading(id, false);
+    advance(60_000);
+    setToastsBlocked(false);
+    advance(60_000);
+    assert.equal(toasts()[0].actionPending, true);
+    await runToastAction(id);
+    assert.equal(attempts, 1);
+    respond.resolve(false);
+    await first;
+    advance(60_000);
+    assert.equal(toasts()[0].actionPending, false);
+    const second = runToastAction(id);
+    respond.reject(new Error("Unavailable"));
+    await second;
+    assert.ok(toasts().some((toast) => toast.kind === "warning"));
+    advance(60_000);
+    const retry = runToastAction(id);
+    respond.resolve(true);
+    await retry;
+    assert.equal(attempts, 3);
+    assert.equal(toasts().length, 0);
+  }));
+
+test("late shortcut completion only removes the original notification", (context) =>
+  withToastClock(context, async ({ pushToast, runToastAction, removeToastByKey, dismissToast, toasts, advance }) => {
+    for (const replace of [false, true]) {
+      let finish;
+      pushToast({ kind: "success", key: "result", persistent: false, title: "Finished",
+        action: { label: "Show", run: () => new Promise((resolve) => { finish = resolve; }) } });
+      const { id } = toasts()[0];
+      const running = runToastAction(id);
+      for (let i = 0; i < 3; i++) pushToast({ kind: "danger", title: "Urgent" });
+      assert.ok(toasts().every((toast) => toast.id !== id));
+      if (replace) pushToast({ kind: "success", key: "result", title: "Replacement" });
+      finish(true);
+      await running;
+      while (toasts()[0]?.kind === "danger") dismissToast(toasts()[0].id);
+      assert.deepEqual(toasts().map((toast) => toast.title), replace ? ["Replacement"] : []);
+      removeToastByKey("result");
+      advance(60_000);
+      assert.equal(toasts().length, 0);
+    }
   }));
 
 test("unmounting a displaced toast clears its reading hold and preserves its remaining time in the queue", (context) =>
