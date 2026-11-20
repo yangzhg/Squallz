@@ -59,6 +59,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import Icon from "./Icon.svelte";
+  import ArchiveEntryLabel from "./ArchiveEntryLabel.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
   import ArchiveEditingStatus from "./ArchiveEditingStatus.svelte";
@@ -100,6 +101,7 @@
     onBrowseScroll,
     onSelectEntry,
     onActivateEntry,
+    onOpenResultFolder,
     onEntryKeydown,
     onOpenEntryContext,
     onToggleEntrySelection,
@@ -168,10 +170,10 @@
       </div>
     </div>
     <div class="summary-actions">
-      <button class="primary large" disabled={!view.actions.enabled.extract_all} title={view.actions.extractDestinationHint} onclick={onExtractAll}>
+      <button class="large" class:primary={!view.actions.enabled.extract_selection} class:ghost={view.actions.enabled.extract_selection} disabled={!view.actions.enabled.extract_all} title={view.actions.extractDestinationHint} onclick={onExtractAll}>
         <Icon name="archive" size={17} />{view.actions.extractAllLabel}
       </button>
-      <button class="ghost large" disabled={!view.actions.enabled.extract_selection} title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
+      <button class="large" class:primary={view.actions.enabled.extract_selection} class:ghost={!view.actions.enabled.extract_selection} disabled={!view.actions.enabled.extract_selection} title={view.actions.extractDestinationHint} onclick={onExtractSelection}>
         <Icon name="archive" size={17} />{view.actions.extractSelectedLabel}
       </button>
       <button
@@ -412,10 +414,8 @@
                           : "FILE"}
                 {/if}
               </span>
-              <span class="archive-entry-label">
-                <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
-                {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
-              </span>
+              <ArchiveEntryLabel {entry} {tr} {onOpenResultFolder}
+                tabStop={entry.source?.path === tabStopPath} disabled={view.selection.busy} />
               {#if entry.source}
                 <button
                   class="row-preview-button"

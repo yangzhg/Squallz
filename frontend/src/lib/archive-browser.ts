@@ -3,9 +3,9 @@ import type { ArchiveBrowseRecoveryState } from "../components/ArchiveBrowseReco
 import type { ArchiveEditingState } from "../components/ArchiveEditingStatus.svelte";
 import type { MoveConflictReviewView } from "../components/MoveConflictReview.svelte";
 
-export type BrowserEntry = {
+export type DisplayEntry = {
   name: string;
-  location: string;
+  location: { path: string; label: string } | null;
   type: string;
   size: string;
   packed: string;
@@ -16,6 +16,9 @@ export type BrowserEntry = {
   attr: string;
   source?: EntryDto;
   virtualIndex?: number;
+};
+
+export type BrowserEntry = DisplayEntry & {
   selected: boolean;
   previewing: boolean;
   previewBusy: boolean;
@@ -84,6 +87,7 @@ export interface ArchiveBrowserActions {
   onBrowseScroll: (event: Event) => void;
   onSelectEntry: (entry: BrowserEntry, event: MouseEvent | KeyboardEvent) => void;
   onActivateEntry: (entry: BrowserEntry) => void;
+  onOpenResultFolder: (entry: BrowserEntry) => void;
   onEntryKeydown: (event: KeyboardEvent, entry: BrowserEntry) => void;
   onOpenEntryContext: (event: MouseEvent, entry: BrowserEntry) => void;
   onToggleEntrySelection: (entry: BrowserEntry, event: MouseEvent) => void;

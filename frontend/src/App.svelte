@@ -19,7 +19,7 @@
   import type { ArchiveEditingState } from "./components/ArchiveEditingStatus.svelte";
   import AppIcon from "./components/AppIcon.svelte";
   import ClassicArchiveBrowserHost from "./components/ClassicArchiveBrowserHost.svelte";
-  import type { ArchiveBrowserActions, ArchiveBrowserView, ArchivePreviewActions, ArchivePreviewView } from "./lib/archive-browser";
+  import type { ArchiveBrowserActions, ArchiveBrowserView, ArchivePreviewActions, ArchivePreviewView, DisplayEntry } from "./lib/archive-browser";
   import type { ClassicArchiveBrowserSurfaceProps } from "./components/ClassicArchiveBrowserHost.svelte";
   import ArchiveOperationWorkspaceHost from "./components/ArchiveOperationWorkspaceHost.svelte";
   import type {
@@ -76,6 +76,7 @@
     adoptOpenedArchive,
     archive,
     archiveBrowseError,
+    archiveBrowseGeneration,
     archiveRefreshStatus,
     archiveOpenError,
     archivePasswordBookStatus,
@@ -304,20 +305,6 @@
     action?: string | null;
     output?: string | null;
   };
-  type DisplayEntry = {
-    name: string;
-    location: string;
-    type: string;
-    size: string;
-    packed: string;
-    ratio: string;
-    modified: string;
-    crc: string;
-    encoding: string;
-    attr: string;
-    source?: EntryDto;
-    virtualIndex?: number;
-  };
   type EntryContext = {
     x: number;
     y: number;
@@ -381,6 +368,10 @@
   let firstRunRecommendedButton = $state<HTMLButtonElement | null>(null);
   let firstRunDropFeedback = $state<string | null>(null);
   let currentArchive = $derived(archive());
+  const singleSelectedRow = $derived.by(() => {
+    const path = singleSelectedPath();
+    return path === null ? null : findLoadedRow(path);
+  });
   let archiveDirs = $derived(currentDirs());
   let passwordBookStatus = $derived(archivePasswordBookStatus());
   let passwordSaveState = $derived(archivePasswordSave());
@@ -1975,8 +1966,12 @@
     navigateToScreen(next);
   }
 
+  function currentExtractAction(): "extract_selection" | "extract_all" {
+    return selectedPaths().size > 0 ? "extract_selection" : "extract_all";
+  }
+
   function navigationAction(next: Screen): AppAction | undefined {
-    if (next === "extract") return "extract_all";
+    if (next === "extract") return currentExtractAction();
     if (next === "create") return "create_archive";
     if (next === "settingsGeneral") return "settings";
     return undefined;
@@ -1995,6 +1990,7 @@
   }
 
   function navigateToScreen(next: Screen) {
+    if (next === "extract" && screen === next) return;
     const action = navigationAction(next);
     if (action) {
       void runAppAction(action);
@@ -2304,6 +2300,7 @@
       onBrowseScroll: onBrowseVirtualScroll,
       onSelectEntry: (entry, event) => selectEntry(entry, event),
       onActivateEntry: (entry) => void activateEntry(entry),
+      onOpenResultFolder: (entry) => void openSearchResultFolder(entry),
       onEntryKeydown: (event, entry) => onEntryKeydown(event, entry),
       onOpenEntryContext: (event, entry) => openEntryContext(event, entry),
       onToggleEntrySelection: (entry, event) => toggleEntrySelection(entry, event),
@@ -2364,8 +2361,10 @@
           previewLabel,
           previewIcon: previewActionIcon(),
           extractDestinationHint: archiveSelectionBusyReason() || extractView.extractDestinationHint(),
-          extractAllLabel: extractAllToLabel(),
-          extractSelectedLabel: extractSelectedToLabel(),
+          extractAllLabel: tr("gui.action.extract_all_to"),
+          extractSelectedLabel: selectedPaths().size
+            ? tr("gui.action.extract_selected_count").replace("{count}", selectedPaths().size.toLocaleString())
+            : tr("gui.action.extract_selected_to"),
           nestedPreview: Boolean(nestedPreview),
         },
         encodingWarning: hasEncodingWarning() ? archiveWarningText() : null,
@@ -3322,13 +3321,12 @@
   function toDisplayEntry(row: EntryDto): DisplayEntry {
     const ratio =
       row.compressed && row.size > 0 ? `${Math.round((row.compressed / row.size) * 100)}%` : "-";
-    const normalizedPath = row.path.replaceAll("\\", "/").replace(/\/+$/g, "");
-    const parentBoundary = normalizedPath.lastIndexOf("/");
-    const location = filterText().trim()
-      ? parentBoundary < 0
-        ? tr("gui.list.archive_root")
-        : normalizedPath.slice(0, parentBoundary)
-      : "";
+    let location: DisplayEntry["location"] = null;
+    if (filterText().trim()) {
+      const path = row.path.replaceAll("\\", "/").replace(/\/+$/g, "");
+      const parent = path.slice(0, Math.max(0, path.lastIndexOf("/")));
+      location = { path: parent, label: parent || tr("gui.list.archive_root") };
+    }
     return {
       name: row.display,
       location,
@@ -4419,7 +4417,7 @@
   }
 
   function canRenameSelection(): boolean {
-    return hasArchiveSelection() && !archiveMutationDisabledReason() && selectedRenameSource() !== null;
+    return hasArchiveSelection() && !archiveMutationDisabledReason() && singleSelectedPath() !== null;
   }
 
   function entryExtension(entryPath: string): string {
@@ -4429,7 +4427,7 @@
   }
 
   function previewEntryForPath(entryPath: string): EntryDto | null {
-    return findLoadedRow(entryPath);
+    return entryPath === singleSelectedPath() ? singleSelectedRow : findLoadedRow(entryPath);
   }
 
   function previewEntryDisplayName(entryPath: string): string {
@@ -4486,7 +4484,7 @@
   }
 
   function selectedPreviewPolicy(): PreviewPolicy {
-    return previewPolicyFor(selectedPreviewPath());
+    return previewPolicyFor(singleSelectedPath());
   }
 
   function canPreviewEntrySelection(): boolean {
@@ -4532,7 +4530,7 @@
   }
 
   function previewActionLabel(
-    entryPath: string | null = selectedPreviewPath(),
+    entryPath: string | null = singleSelectedPath(),
     entryType: EntryDto["entry_type"] | null = null,
   ): string {
     if (previewBusy()) return tr("gui.preview.loading");
@@ -4540,7 +4538,7 @@
   }
 
   function previewActionIcon(
-    entryPath: string | null = selectedPreviewPath(),
+    entryPath: string | null = singleSelectedPath(),
     entryType: EntryDto["entry_type"] | null = null,
   ): "external-link" | "folder-open" | "eye" {
     const kind = previewPolicyFor(entryPath, entryType).kind;
@@ -4596,22 +4594,17 @@
     return archiveSelectionRoots(selectedPaths());
   }
 
-  function selectedRenameSource(): string | null {
-    const selected = [...selectedPaths()];
-    return selected.length === 1 ? selected[0] : null;
+  function singleSelectedPath(): string | null {
+    const selected = selectedPaths();
+    return selected.size === 1 ? selected.values().next().value ?? null : null;
   }
 
   function archiveLikePath(path: string): boolean {
     return archiveExtensionMatch(path) !== null;
   }
 
-  function selectedPreviewPath(): string | null {
-    const selected = [...selectedPaths()];
-    return selected.length === 1 ? selected[0] : null;
-  }
-
   function entryTypeForPath(entryPath: string): EntryDto["entry_type"] | null {
-    return findLoadedRow(entryPath)?.entry_type ?? null;
+    return previewEntryForPath(entryPath)?.entry_type ?? null;
   }
 
   function nestedPreviewTitle(): string {
@@ -4781,14 +4774,6 @@
     if (import.meta.env.DEV && previewDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, previewDelayMs));
     }
-  }
-
-  function extractAllToLabel(): string {
-    return tr("gui.action.extract_all_to");
-  }
-
-  function extractSelectedToLabel(): string {
-    return tr("gui.action.extract_selected_to");
   }
 
   function extractPasswordLabel(): string {
@@ -5142,30 +5127,51 @@
     };
   }
 
-  async function openArchiveDirectoryEntry(entryPath: string) {
-    const name = pathBaseName(entryPath.replace(/\/+$/g, ""));
+  async function openSearchResultFolder(entry: DisplayEntry) {
+    if (!entry.location || !entry.source || !filterText().trim() || entry.virtualIndex === undefined
+      || rowAt(entry.virtualIndex)?.path !== entry.source.path || blockSelectionScopedAction()) return;
+    await openArchiveDirectoryEntry(entry.location.path, entry.location.label);
+  }
+
+  async function openArchiveDirectoryEntry(entryPath: string, resultFolderLabel?: string) {
+    if (!currentArchive) return;
+    const name = resultFolderLabel ?? pathBaseName(entryPath.replace(/\/+$/g, ""));
     if (!name) {
       showNotice(tr("gui.preview.open_folder_failed"));
       return;
     }
-    const targetDirectory = entryPath
+    const directory = entryPath
       .replaceAll("\\", "/")
       .replace(/^\/+|\/+$/g, "");
+    const id = currentArchive.id;
+    const navigation = taskReviewRequestGeneration;
+    const origin = document.activeElement;
+    const viewMode = mode;
     clearEntryPreviewState();
-    clearSelection();
-    await enterDirPath(entryPath);
-    if (archiveBrowseError() || archiveDirs.join("/") !== targetDirectory) return;
+    const listing = enterDirPath(directory);
+    const generation = archiveBrowseGeneration();
+    await listing;
+    const isCurrent = () => archiveBrowseGeneration() === generation && currentArchive?.id === id
+      && taskReviewRequestGeneration === navigation && mode === viewMode
+      && !archiveBrowseError() && archiveDirs.join("/") === directory;
+    if (!isCurrent()) return;
     browseScrollTop = 0;
     recordValidationEvent("frontend.entry.open_dir", {
       entry_path: entryPath,
       name,
       path: archiveDirs.join("/"),
     });
-    showNotice(tr("gui.preview.folder_opened").replace("{name}", name));
+    showNotice(tr("gui.preview.folder_opened").replace("{name}", () => name));
+    if (resultFolderLabel === undefined) return;
+    const canFocus = () => isCurrent() && screen === "browse" && !blockingModalVisible() && !taskCenterOpen
+      && !modeSelectionBlocked && (document.activeElement === origin || document.activeElement === document.body);
+    if (!canFocus()) return;
+    if (totalRows()) await focusArchiveRow(0, null, canFocus);
+    else archiveSearchInput?.focus({ preventScroll: true });
   }
 
   async function submitPreviewEntry(
-    entryPath: string | null = selectedPreviewPath(),
+    entryPath: string | null = singleSelectedPath(),
     entryType: EntryDto["entry_type"] | null = null,
     virtualIndex: number | null = null,
   ) {
@@ -6827,7 +6833,7 @@
   function classicCommandAction(label: string): AppAction | undefined {
     const actions: Record<string, AppAction> = {
       Add: "add_files",
-      "Extract To": selectedPaths().size > 0 ? "extract_selection" : "extract_all",
+      "Extract To": currentExtractAction(),
       Test: "test_archive",
       View: "preview_entry",
       Delete: "delete_entries",
@@ -6916,7 +6922,7 @@
 
   function classicCommandDisplayLabel(label: string): string {
     if (label === "View") {
-      const entryPath = selectedPreviewPath();
+      const entryPath = singleSelectedPath();
       return entryPath ? previewActionLabel(entryPath) : tr("gui.action.open_preview");
     }
     return label === "Extract To" && hasArchiveSelection()
@@ -7277,7 +7283,8 @@
           {:else if currentArchive || screen === "recent"}
             <button disabled={!appActionEnabled("open_archive")} aria-busy={archiveOpenStatus === "opening"} onclick={() => void runAppAction("open_archive")}><Icon name="folder-open" size={16} />{archiveOpenStatus === "opening" ? toolbarLabel("Opening") : toolbarLabel("Open")}</button>
             {#if screen === "browse" && currentArchive}
-            <button class="primary" disabled={!appActionEnabled("extract_all")} title={archiveSelectionBusyReason() || archiveActionTitle(hasArchiveOpen())} onclick={() => void runAppAction("extract_all")}><Icon name="archive" size={16} />{toolbarLabel("Extract")}</button>
+              {@const action = currentExtractAction()}
+              <button disabled={!appActionEnabled(action)} title={archiveSelectionBusyReason() || extractView.extractDestinationHint()} onclick={() => void runAppAction(action)}><Icon name="archive" size={16} />{tr(action === "extract_selection" ? "gui.action.extract_selected" : "gui.action.extract_all")}</button>
             {/if}
           {/if}
           {#if !isSettingsScreen()}

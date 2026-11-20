@@ -11494,7 +11494,7 @@ input.secure-input {
 }
 
 .archive-entry-label strong,
-.archive-entry-label small {
+.archive-entry-label .archive-entry-location {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -11507,9 +11507,13 @@ input.secure-input {
   font-weight: var(--font-weight-normal);
 }
 
-.archive-entry-label small {
+.archive-entry-location {
   flex: 0 1 var(--archive-entry-location-max-share);
-  color: var(--color-text-secondary);
+  justify-self: start;
+  max-width: 100%;
+  text-align: start;
+  text-decoration: underline;
+  color: var(--color-control-fg);
   font-family: var(--font-mono);
   font-size: var(--type-control);
 }
@@ -11520,7 +11524,17 @@ input.secure-input {
   gap: 0;
 }
 
-.modern-row .archive-entry-label small {
+.archive-entry-location:hover:not(:disabled),
+.archive-entry-location:focus-visible {
+  color: var(--color-accent-fg);
+}
+
+.archive-entry-location:disabled {
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+
+.modern-row .archive-entry-location {
   line-height: var(--type-control-line);
 }
 
@@ -12751,12 +12765,16 @@ select.classic-input:focus {
   overscroll-behavior-x: contain;
 }
 
-.classic-row .archive-entry-label :is(strong, small) {
+.classic-row .archive-entry-label :is(strong, .archive-entry-location) {
   width: max-content;
   min-width: 100%;
   overflow: visible;
   text-overflow: clip;
   line-height: var(--type-control-line);
+}
+
+.classic-row .archive-entry-location {
+  max-width: none;
 }
 
 .classic-head,
@@ -15093,7 +15111,7 @@ select.classic-input:focus {
   color: inherit;
 }
 
-.design-root :is(.modern-row, .classic-row) .row-preview-button:focus-visible {
+.design-root :is(.modern-row, .classic-row) :is(.row-preview-button, .archive-entry-location):focus-visible {
   outline: var(--border-width-focus) solid var(--color-accent-fg);
   outline-offset: calc(-1 * var(--border-width-focus));
 }

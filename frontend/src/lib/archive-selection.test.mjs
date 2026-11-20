@@ -41,7 +41,7 @@ async function loadSelectionHandlers(archive, overrides = {}) {
   const names = new Set([
     "selectEntry", "selectOnlyEntry", "showEntryContextAt", "runArchiveSelection", "toggleEntrySelection",
     "submitDeleteSelectedJob", "selectedDeletePaths", "closeEntryContext",
-    "selectedRenameSource", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen",
+    "singleSelectedPath", "canRenameSelection", "hasArchiveSelection", "hasArchiveOpen",
     "entryPreviewForPath", "hasPreparedPreviewForPath",
   ]);
   const declarations = selectFunctions(source, names);
@@ -243,6 +243,27 @@ test("range selection fetches only missing intersecting pages with bounded concu
     assert.equal(archive.allCurrentRowsSelected(), true);
     assert.equal(archive.selectedPaths().size, entries.length);
     assert.equal(archive.loadedRowCount(), cachedCount);
+    const requestsAfterSelectAll = requested.length;
+    archive.toggleSelect(entries[497], 497);
+    assert.equal(archive.allCurrentRowsSelected(), false);
+    archive.toggleSelect(entries[497], 497);
+    assert.equal(archive.allCurrentRowsSelected(), true);
+    assert.equal(requested.length, requestsAfterSelectAll, "restoring all rows needs no additional reads");
+  });
+});
+
+test("a row outside the current view cannot complete or replace its selection", async () => {
+  await withArchive(async (archive) => {
+    const entries = manyRows(2);
+    const oldRow = { ...entries[1], path: "another-folder/old.txt" };
+    installPages(archive, entries, [0], { filter: "item", selected: [entries[0].path, oldRow.path] });
+    assert.deepEqual([...archive.selectedPaths()], [entries[0].path]);
+    archive.toggleSelect(oldRow, 1);
+    assert.equal(archive.allCurrentRowsSelected(), false);
+    archive.selectRow(oldRow, 1);
+    assert.deepEqual([...archive.selectedPaths()], [entries[0].path]);
+    archive.toggleSelect(entries[1], 1);
+    assert.equal(archive.allCurrentRowsSelected(), true);
   });
 });
 

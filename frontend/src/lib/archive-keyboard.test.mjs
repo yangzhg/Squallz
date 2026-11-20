@@ -107,7 +107,7 @@ test("both archive browsers expose one row Tab stop with selection and open cont
   const { render } = await server.ssrLoadModule("svelte/server");
   const rows = Array.from({ length: 3 }, (_, index) => ({
     source: { path: `notes-${index}.txt`, entry_type: "file" }, virtualIndex: index,
-    name: `notes-${index}.txt`, location: "reports", type: "file", size: "1 KB", packed: "500 B",
+    name: `notes-${index}.txt`, location: { path: "reports", label: "reports" }, type: "file", size: "1 KB", packed: "500 B",
     ratio: "50%", modified: "2026-10-22", crc: "12345678", encoding: "UTF-8", attr: "File",
     selected: index === 1, previewing: false, previewBusy: false, selectionLabel: "Select item",
     previewActionLabel: "Open item", previewActionIcon: "eye",
@@ -132,12 +132,39 @@ test("both archive browsers expose one row Tab stop with selection and open cont
     const controls = [...rowGroup.matchAll(/<button[^>]*(?:row-select-toggle|row-preview-button)[^>]*>/g)];
     assert.equal(controls.length, 6, name);
     assert.ok(controls.every(([tag]) => tag.includes('tabindex="-1"')), name);
+    const locations = [...rowGroup.matchAll(/<button[^>]*class="archive-entry-location"[^>]*>/g)];
+    assert.equal(locations.length, 3, name);
+    assert.deepEqual(locations.map(([tag]) => tag.includes('tabindex="0"')), [false, true, false], name);
+    assert.ok(locations.every(([tag]) => tag.includes('aria-label="Open containing folder: reports"')), name);
     if (name === "ClassicArchiveBrowser") {
       assert.match(body, /aria-colcount="4"/);
       assert.equal([...body.matchAll(/role="columnheader"/g)].length, 4);
       assert.doesNotMatch(body, /12345678/);
     }
   }
+});
+
+test("opening a search result folder leaves feedback and focus with the latest visit", async () => {
+  const pending = [];
+  const notices = [];
+  let focused = 0;
+  const app = harness(["openSearchResultFolder", "openArchiveDirectoryEntry"], {
+    archiveDirs: ["$&"], filterText: () => "notes", rowAt: () => ({ path: "$&/notes.txt" }),
+    blockSelectionScopedAction: () => false, clearEntryPreviewState() {}, document: { body: null, activeElement: null },
+    enterDirPath: (path) => { assert.equal(path, "$&"); const visit = deferred(); pending.push(visit); return visit.promise; },
+    archiveBrowseGeneration: () => pending.length, archiveBrowseError: () => null, browseScrollTop: 30,
+    tr: englishTranslate, recordValidationEvent() {}, showNotice: (text) => notices.push(text),
+    modeSelectionBlocked: false, totalRows: () => 1, focusArchiveRow: () => { focused++; },
+  });
+  const entry = { source: { path: "$&/notes.txt" }, virtualIndex: 2, location: { path: "$&", label: "$&" } };
+  const first = app.openSearchResultFolder(entry);
+  const second = app.openSearchResultFolder(entry);
+  pending[1].resolve();
+  await second;
+  pending[0].resolve();
+  await first;
+  assert.deepEqual(notices, ["Opened folder: $&"]);
+  assert.equal(focused, 1);
 });
 
 test("loaded keyboard targets preserve range intent and ignore stale requests or changed selection", async () => {

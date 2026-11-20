@@ -18,13 +18,7 @@ export class ExtractPresentation {
   extractPlanDescription(): string {
     if (!this.session.archive) return this.session.destination;
     if (this.session.plan.phase === "blocked") return this.session.spaceFailure;
-    return this.session.plan.phase === "ready"
-      ? tr(
-          "gui.extract.plan_ready_body",
-        )
-      : tr(
-          "gui.extract.plan_checking_body",
-        );
+    return tr("gui.extract.plan_checking_body");
   }
 
   extractPlanLayoutLabel(): string {
@@ -112,21 +106,20 @@ export class ExtractPresentation {
 
   extractSelectionLabel(): string {
     if (!this.session.archive) return this.session.destination;
-    const count = this.session.options.selectionSnapshot()?.length ?? 0;
     return this.session.state.scope === "selection"
-      ? tr("gui.selection.count_selected").replace("{count}", count.toLocaleString())
+      ? tr("gui.selection.count_selected").replace("{count}", this.session.state.selection.length.toLocaleString())
       : tr("gui.selection.all_entries");
   }
 
   extractActionLabel(): string {
     if (!this.session.archive) return tr("gui.extract.start");
-    return this.session.options.selectionSnapshot()
+    return this.session.state.scope === "selection"
       ? tr("gui.action.extract_selected")
       : tr("gui.action.extract_all");
   }
 
   extractSafeTitle(): string {
-    return this.session.options.selectionSnapshot()
+    return this.session.state.scope === "selection"
       ? tr("gui.extract.safe_title")
       : tr("gui.extract.safe_title_all");
   }

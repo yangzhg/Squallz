@@ -70,7 +70,7 @@
   </header>
 
   {#if phase === "ready" || phase === "blocked"}
-    <p>{description}</p>
+    {#if phase === "blocked"}<p>{description}</p>{/if}
     <div class="extract-plan-destination">
       <span>{destinationLabel}</span>
       <strong>{destination}</strong>

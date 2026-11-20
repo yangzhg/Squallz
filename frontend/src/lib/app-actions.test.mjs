@@ -126,7 +126,7 @@ test("archive editing checks the source and registered capabilities while readin
     allFormats: () => formats,
     hasArchiveOpen: () => true,
     hasArchiveSelection: () => state.selected && !state.selectionBusy,
-    selectedRenameSource: () => state.selected ? "inner-readme.txt" : null,
+    singleSelectedPath: () => state.selected ? "inner-readme.txt" : null,
     selectedPaths: () => new Set(state.selected ? ["inner-readme.txt"] : []),
     appActionEnabled: (action) => availability()[action],
     archiveRefreshStatusLabel: () => state.refresh,
@@ -140,7 +140,7 @@ test("archive editing checks the source and registered capabilities while readin
     runAppAction: (action) => actions.dispatchAppAction(action, availability(), {
       [action]: () => { calls.push(action); },
     }),
-  }, ["classicCommandAction", "classicCommandDisabled", "classicCommandDisabledTitle", "handleClassicCommand", "previewSelectedDisabledReason",
+  }, ["currentExtractAction", "classicCommandAction", "classicCommandDisabled", "classicCommandDisabledTitle", "handleClassicCommand", "previewSelectedDisabledReason",
     "archiveSourceMutationDisabledReason", "archiveMutationDisabledReason", "archiveEditingStatus", "canRenameSelection",
     "renameSelectedDisabledReason", "moveSelectedDisabledReason", "deleteSelectedDisabledReason", "openArchiveEditor", "submitDeleteSelectedJob"]);
   assert.equal(app.classicCommandDisabled("View"), true);

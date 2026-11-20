@@ -17,6 +17,7 @@
 
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import ArchiveEntryLabel from "./ArchiveEntryLabel.svelte";
   import ArchiveEntryPreview from "./ArchiveEntryPreview.svelte";
   import ArchiveStructureWarning from "./ArchiveStructureWarning.svelte";
   import ArchiveBrowseRecovery from "./ArchiveBrowseRecovery.svelte";
@@ -46,6 +47,7 @@
     onBrowseScroll,
     onSelectEntry,
     onActivateEntry,
+    onOpenResultFolder,
     onEntryKeydown,
     onOpenEntryContext,
     onToggleEntrySelection,
@@ -215,10 +217,8 @@
                     onToggleEntrySelection(entry, event);
                   }}
                 ></button>
-                <span class="archive-entry-label">
-                  <strong title={entry.source?.path ?? entry.name}>{entry.name}</strong>
-                  {#if entry.location}<small title={entry.source?.path}>{entry.location}</small>{/if}
-                </span>
+                <ArchiveEntryLabel {entry} {tr} {onOpenResultFolder}
+                  tabStop={entry.source?.path === tabStopPath} disabled={view.selection.busy} />
                 {#if entry.source}
                   <button
                     class="row-preview-button compact"

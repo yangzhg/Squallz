@@ -92,7 +92,7 @@
             <div class="path-decision">
               <span class="block-label">{view.extractDestinationFieldLabel()}</span>
               <strong title={session.destination}>{session.destination}</strong>
-              <p>{tr("gui.extract.snapshot_hint")}</p>
+              {#if session.state.destinationMode === "smart"}<p>{tr("gui.extract.smart_tip")}</p>{/if}
             </div>
             <div class="destination-grid">
               {#each destinations as choice (choice.mode)}
@@ -114,12 +114,11 @@
               <div class="extract-essentials-fact">
                 <span>{tr("gui.inspector.archive")}</span>
                 <strong>{bridge.archiveTitle}</strong>
-                <p>{bridge.archiveLine} · {view.extractSelectionLabel()}</p>
+                <p>{view.extractSelectionLabel()}</p>
               </div>
               <div class="extract-essentials-fact">
                 <span>{tr("gui.extract.password")}</span>
                 <strong>{bridge.password}</strong>
-                <p>{tr("gui.extract.snapshot_hint")}</p>
               </div>
             </div>
           </div>

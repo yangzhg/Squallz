@@ -80,8 +80,6 @@ const store = $state({
   filterPending: false,
   /** Selected full paths (dirs end with `/`) */
   selected: new Set<string>(),
-  /** Selection was expanded across the complete current directory or search result. */
-  selectedAllCurrentRows: false,
   /** Invalidates pending selection requests after any later selection change. */
   selectionGeneration: 0,
   selectionAnchor: null as SelectionAnchor | null,
@@ -148,6 +146,10 @@ export function currentDirs(): string[] {
   return store.dirs;
 }
 
+export function archiveBrowseGeneration(): number {
+  return store.generation;
+}
+
 export function currentPrefix(): string {
   return store.dirs.length ? store.dirs.join("/") + "/" : "";
 }
@@ -189,12 +191,14 @@ export function filterPending(): boolean {
   return store.filterPending;
 }
 
-export function selectedPaths(): Set<string> {
+export function selectedPaths(): ReadonlySet<string> {
   return store.selected;
 }
 
 export function allCurrentRowsSelected(): boolean {
-  return store.selectedAllCurrentRows;
+  // Directory and search rows have unique full paths. Selection is scoped to this view,
+  // including rows read transiently for a range and never retained in the page cache.
+  return store.total > 0 && store.selected.size === store.total;
 }
 
 export function selectedSize(): number {
@@ -996,14 +1000,6 @@ function cancelBackendSearch(generation: number): void {
 
 /* ---- Selection ---- */
 
-function selectionCoversLoadedCurrentRows(selected: ReadonlySet<string>): boolean {
-  if (store.total === 0 || loadedRowCount() < store.total) return false;
-  for (const rows of store.pages.values()) {
-    if (rows.some((row) => !selected.has(row.path))) return false;
-  }
-  return true;
-}
-
 function selectionRowIndex(row: EntryDto, index?: number): number | null {
   if (
     index !== undefined && Number.isInteger(index) && index >= 0 && index < store.total
@@ -1016,41 +1012,42 @@ function selectionRowIndex(row: EntryDto, index?: number): number | null {
   return null;
 }
 
-function setSelectionAnchor(row: EntryDto, index?: number): void {
+function anchorSelectionRow(row: EntryDto, index?: number): EntryDto | null {
+  if (store.filterPending) return null;
   const rowIndex = selectionRowIndex(row, index);
-  store.selectionAnchor = rowIndex === null ? null : { index: rowIndex, generation: store.generation };
+  if (rowIndex === null) return null;
+  const current = rowAt(rowIndex);
+  if (!current) return null;
+  store.selectionGeneration += 1;
+  store.selectionAnchor = { index: rowIndex, generation: store.generation };
+  return current;
 }
 
 /** Replaces the selection with a single row and starts a new range anchor. */
 export function selectRow(row: EntryDto, index?: number): void {
-  if (store.filterPending) return;
-  store.selectionGeneration += 1;
-  store.selected = new Set([row.path]);
-  store.selectedSize = row.size;
-  store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(store.selected);
-  setSelectionAnchor(row, index);
+  const current = anchorSelectionRow(row, index);
+  if (!current) return;
+  store.selected = new Set([current.path]);
+  store.selectedSize = current.size;
 }
 
 export function toggleSelect(row: EntryDto, index?: number): void {
-  if (store.filterPending) return;
-  store.selectionGeneration += 1;
+  const current = anchorSelectionRow(row, index);
+  if (!current) return;
   const selected = new Set(store.selected);
-  if (selected.has(row.path)) {
-    selected.delete(row.path);
-    store.selectedSize -= row.size;
+  if (selected.has(current.path)) {
+    selected.delete(current.path);
+    store.selectedSize -= current.size;
   } else {
-    selected.add(row.path);
-    store.selectedSize += row.size;
+    selected.add(current.path);
+    store.selectedSize += current.size;
   }
   store.selected = selected;
-  store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(selected);
-  setSelectionAnchor(row, index);
 }
 
 export function clearSelection(): void {
   store.selectionGeneration += 1;
   store.selected = new Set();
-  store.selectedAllCurrentRows = false;
   store.selectedSize = 0;
   store.selectionAnchor = null;
 }
@@ -1070,7 +1067,6 @@ export function selectAllLoaded(): void {
     }
   }
   store.selected = selected;
-  store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(selected);
   store.selectedSize = selectedSize;
 }
 
@@ -1116,8 +1112,6 @@ async function selectRowsInRange(
   const dirPrefix = currentPrefix();
   const total = store.total;
   const rangeCount = last - first + 1;
-  const coversAll = (first === 0 && last === total - 1)
-    || (additive && store.selectedAllCurrentRows);
   const selected = new Set<string>(additive ? store.selected : []);
   let selectedSize = additive ? store.selectedSize : 0;
   let loaded = 0;
@@ -1187,7 +1181,6 @@ async function selectRowsInRange(
   if (!isCurrent()) return "stale";
   if (loaded !== rangeCount) return "failed";
   store.selected = selected;
-  store.selectedAllCurrentRows = coversAll || selectionCoversLoadedCurrentRows(selected);
   store.selectedSize = selectedSize;
   store.selectionAnchor = anchor;
   store.selectionGeneration += 1;
@@ -1237,19 +1230,26 @@ export function installArchivePreview(
   cancelFilterReload();
   store.filter = options?.filter ?? "";
   store.filterPending = false;
-  store.selected = new Set(options?.selected ?? []);
-  store.selectedAllCurrentRows = false;
+  const requested = new Set(options?.selected);
+  const selected = new Set<string>();
+  let selectedSize = 0;
+  if (requested.size) {
+    for (const page of store.pages.values()) {
+      for (const row of page) {
+        if (requested.delete(row.path)) {
+          selected.add(row.path);
+          selectedSize += row.size;
+        }
+      }
+    }
+  }
+  store.selected = selected;
   store.selectionGeneration += 1;
   store.selectionAnchor = null;
   store.previewRows = options?.previewRows ?? null;
   clearBrowseError();
   clearArchiveRefreshStatus();
-  store.selectedSize =
-    options?.selectedSize ??
-    rows
-      .filter((row) => store.selected.has(row.path))
-      .reduce((sum, row) => sum + row.size, 0);
-  store.selectedAllCurrentRows = selectionCoversLoadedCurrentRows(store.selected);
+  store.selectedSize = options?.selectedSize ?? selectedSize;
   store.generation += 1;
   store.encodingOverride = info.encoding_override;
   store.passwordPrompt = null;
